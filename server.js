@@ -223,9 +223,15 @@ app.post("/api/ai", async (req, res) => {
     .filter(m => ["user", "assistant"].includes(m.role))
     .map(m => ({ role: m.role, content: String(m.content).slice(0, 4000) }));
   if (!history.length) return res.status(400).json({ error: "no message" });
+  const ctx = req.body.ctx || {};
+  const ctxBits = [
+    ctx.activity ? `They are currently studying: ${String(ctx.activity).slice(0, 64)}.` : "",
+    ctx.todayMin > 0 ? `They've focused ${Math.min(1440, Number(ctx.todayMin) | 0)} minutes today.` : "",
+    ctx.streak > 1 ? `They're on a ${Math.min(9999, Number(ctx.streak) | 0)}-day streak.` : "",
+  ].filter(Boolean).join(" ");
   const messages = [{
     role: "system",
-    content: `You are the study assistant inside LockIn, a study-together app. The user is ${u.name}. Help them study: explain concepts clearly, quiz them, make study plans, summarize notes. Be concise and encouraging. Use plain text (no markdown headers).`,
+    content: `You are the study assistant inside LockIn, a study-together app. The user is ${u.name}. ${ctxBits} Help them study: explain concepts clearly, quiz them, make study plans, summarize notes. Be concise and encouraging. Simple formatting only: **bold**, \`code\`, and "- " bullet lists (no headers or tables).`,
   }, ...history];
 
   let lastErr = "AI unavailable";
