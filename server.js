@@ -185,7 +185,29 @@ app.get("/api/state", (req, res) => {
 // ---------- AI study assistant (OpenRouter proxy — key stays server-side) ----------
 const AI_KEY = process.env.OPENROUTER_API_KEY ||
   (fs.existsSync(path.join(__dirname, "openrouter.key")) ? fs.readFileSync(path.join(__dirname, "openrouter.key"), "utf8").trim() : "");
-const AI_MODELS = (process.env.AI_MODELS || "meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free,google/gemini-2.0-flash-exp:free").split(",");
+// model chain: env override, else auto-discovered from OpenRouter's public model list (refreshed every 12h)
+const AI_PREFERRED = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen3-next-80b-a3b-instruct:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "openai/gpt-oss-20b:free",
+  "nousresearch/hermes-3-llama-3.1-405b:free",
+];
+let AI_MODELS = process.env.AI_MODELS ? process.env.AI_MODELS.split(",") : [...AI_PREFERRED];
+async function discoverFreeModels() {
+  if (process.env.AI_MODELS) return;
+  try {
+    const j = await (await fetch("https://openrouter.ai/api/v1/models")).json();
+    const free = new Set(j.data.filter(m => m.id.endsWith(":free")).map(m => m.id));
+    if (!free.size) return;
+    const chain = AI_PREFERRED.filter(id => free.has(id));
+    for (const id of free) { if (chain.length >= 8) break; if (!chain.includes(id)) chain.push(id); }
+    AI_MODELS = chain;
+    console.log(`AI models: ${chain.slice(0, 3).join(", ")} (+${Math.max(0, chain.length - 3)} fallbacks)`);
+  } catch (e) { console.log("AI model discovery failed, using defaults:", e.message); }
+}
+discoverFreeModels();
+setInterval(discoverFreeModels, 12 * 3600e3);
 const aiUse = {}; // userId -> [timestamps], simple 30-req/hour limit
 
 app.post("/api/ai", async (req, res) => {
