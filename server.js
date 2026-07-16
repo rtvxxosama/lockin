@@ -21,7 +21,7 @@ function save() {
 const presence = {}; // userId -> {studying, activity, elapsed, lastSeen}  (in-memory only)
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" })); // room for base64 avatar uploads (client resizes to 128px first)
 // serve the web version if the renderer folder is nearby (repo layout)
 const webDir = path.join(__dirname, "..", "app", "renderer");
 if (fs.existsSync(webDir)) app.use(express.static(webDir));
@@ -109,6 +109,12 @@ app.post("/api/profile", (req, res) => {
   const u = auth(req, res); if (!u) return;
   if (req.body.name) u.name = String(req.body.name).trim().slice(0, 24) || u.name;
   if (req.body.avatar !== undefined) u.avatar = Math.max(0, Math.min(11, Number(req.body.avatar) || 0));
+  if (req.body.avatarImg !== undefined) {
+    const img = String(req.body.avatarImg || "");
+    if (img === "") u.avatarImg = undefined; // clear back to gradient
+    else if (/^data:image\/(png|jpeg|webp);base64,/.test(img) && img.length <= 400_000) u.avatarImg = img;
+    else return res.status(400).json({ error: "avatar must be a small png/jpeg/webp image" });
+  }
   save();
   res.json({ ok: true });
 });
@@ -154,7 +160,7 @@ app.get("/api/state", (req, res) => {
     const p = presence[m];
     const live = p && now - p.lastSeen < 20000;
     return mu && {
-      id: mu.id, name: mu.name, avatar: mu.avatar || 0, coins: mu.coins, totalSeconds: mu.totalSeconds,
+      id: mu.id, name: mu.name, avatar: mu.avatar || 0, avatarImg: mu.avatarImg || null, coins: mu.coins, totalSeconds: mu.totalSeconds,
       streak: currentStreak(mu), today: mu.dayTotals[today()] || 0,
       week: last7(mu).reduce((a, b) => a + b, 0), days: last7(mu), studying: !!(live && p.studying),
       activity: live && p.studying ? p.activity : null, elapsed: live && p.studying ? p.elapsed : 0,
@@ -176,4 +182,45 @@ app.get("/api/state", (req, res) => {
   res.json({ me: pub(u.id), groups });
 });
 
-app.listen(PORT, () => console.log(`LockIn server on http://localhost:${PORT}`));
+// ---------- AI study assistant (OpenRouter proxy — key stays server-side) ----------
+const AI_KEY = process.env.OPENROUTER_API_KEY ||
+  (fs.existsSync(path.join(__dirname, "openrouter.key")) ? fs.readFileSync(path.join(__dirname, "openrouter.key"), "utf8").trim() : "");
+const AI_MODELS = (process.env.AI_MODELS || "meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free,google/gemini-2.0-flash-exp:free").split(",");
+const aiUse = {}; // userId -> [timestamps], simple 30-req/hour limit
+
+app.post("/api/ai", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server (set OPENROUTER_API_KEY)" });
+  const now = Date.now();
+  aiUse[u.id] = (aiUse[u.id] || []).filter(t => now - t < 3600e3);
+  if (aiUse[u.id].length >= 30) return res.status(429).json({ error: "AI limit reached — try again in a bit" });
+  aiUse[u.id].push(now);
+
+  const history = (Array.isArray(req.body.messages) ? req.body.messages : [])
+    .slice(-12)
+    .filter(m => ["user", "assistant"].includes(m.role))
+    .map(m => ({ role: m.role, content: String(m.content).slice(0, 4000) }));
+  if (!history.length) return res.status(400).json({ error: "no message" });
+  const messages = [{
+    role: "system",
+    content: `You are the study assistant inside LockIn, a study-together app. The user is ${u.name}. Help them study: explain concepts clearly, quiz them, make study plans, summarize notes. Be concise and encouraging. Use plain text (no markdown headers).`,
+  }, ...history];
+
+  let lastErr = "AI unavailable";
+  for (const model of AI_MODELS) {
+    try {
+      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${AI_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.trim(), messages, max_tokens: 800 }),
+      });
+      const j = await r.json();
+      const text = j.choices?.[0]?.message?.content;
+      if (r.ok && text) return res.json({ reply: text, model: model.trim() });
+      lastErr = j.error?.message || `model ${model.trim()} unavailable`;
+    } catch (e) { lastErr = e.message; }
+  }
+  res.status(502).json({ error: lastErr });
+});
+
+app.listen(PORT, () => console.log(`LockIn server on http://localhost:${PORT}${AI_KEY ? " (AI enabled)" : ""}`));
