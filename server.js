@@ -58,7 +58,7 @@ app.post("/api/register", (req, res) => {
   const name = String(req.body.name || "").trim().slice(0, 24);
   if (!name) return res.status(400).json({ error: "name required" });
   const userId = id();
-  db.users[userId] = { id: userId, name, secret: id() + id(), coins: 0, totalSeconds: 0, streak: 0, lastStudyDay: null, dayTotals: {}, groups: [] };
+  db.users[userId] = { id: userId, name, secret: id() + id(), avatar: Math.floor(Math.random() * 12), coins: 0, totalSeconds: 0, streak: 0, lastStudyDay: null, dayTotals: {}, groups: [] };
   save();
   res.json({ userId, secret: db.users[userId].secret, name });
 });
@@ -105,6 +105,14 @@ app.post("/api/challenge", (req, res) => {
   res.json({ id: c.id });
 });
 
+app.post("/api/profile", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (req.body.name) u.name = String(req.body.name).trim().slice(0, 24) || u.name;
+  if (req.body.avatar !== undefined) u.avatar = Math.max(0, Math.min(11, Number(req.body.avatar) || 0));
+  save();
+  res.json({ ok: true });
+});
+
 app.post("/api/presence", (req, res) => {
   const u = auth(req, res); if (!u) return;
   presence[u.id] = { studying: !!req.body.studying, activity: String(req.body.activity || "").slice(0, 32), elapsed: Number(req.body.elapsed) || 0, lastSeen: Date.now() };
@@ -146,16 +154,14 @@ app.get("/api/state", (req, res) => {
     const p = presence[m];
     const live = p && now - p.lastSeen < 20000;
     return mu && {
-      id: mu.id, name: mu.name, coins: mu.coins, totalSeconds: mu.totalSeconds,
+      id: mu.id, name: mu.name, avatar: mu.avatar || 0, coins: mu.coins, totalSeconds: mu.totalSeconds,
       streak: currentStreak(mu), today: mu.dayTotals[today()] || 0,
-      week: last7(mu), studying: !!(live && p.studying),
+      week: last7(mu).reduce((a, b) => a + b, 0), days: last7(mu), studying: !!(live && p.studying),
       activity: live && p.studying ? p.activity : null, elapsed: live && p.studying ? p.elapsed : 0,
     };
   };
-  function last7(mu) {
-    let s = 0;
-    for (let i = 0; i < 7; i++) s += mu.dayTotals[new Date(now - i * 864e5).toISOString().slice(0, 10)] || 0;
-    return s;
+  function last7(mu) { // oldest → today
+    return Array.from({ length: 7 }, (_, i) => mu.dayTotals[new Date(now - (6 - i) * 864e5).toISOString().slice(0, 10)] || 0);
   }
   const groups = u.groups.map(code => {
     const g = db.groups[code];
@@ -164,7 +170,7 @@ app.get("/api/state", (req, res) => {
       code, name: g.name,
       members: g.members.map(pub).filter(Boolean),
       challenges: Object.values(db.challenges).filter(c => c.groupCode === code)
-        .map(c => ({ ...c, progress: Object.fromEntries(Object.entries(c.progress).map(([k, v]) => [db.users[k]?.name || "?", v])), winnerName: c.winner === "team" ? "team" : db.users[c.winner]?.name || null, streaks: c.type === "streak" ? Object.fromEntries(g.members.map(m => [db.users[m]?.name || "?", currentStreak(db.users[m] || {})])) : undefined })),
+        .map(c => ({ ...c, winnerName: c.winner === "team" ? "team" : db.users[c.winner]?.name || null, streaks: c.type === "streak" ? Object.fromEntries(g.members.map(m => [m, currentStreak(db.users[m] || {})])) : undefined })),
     };
   }).filter(Boolean);
   res.json({ me: pub(u.id), groups });
