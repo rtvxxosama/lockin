@@ -119,6 +119,53 @@ app.post("/api/profile", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- coin shop ----------
+const SHOP = {
+  frame: { gold: 300, neon: 500, fire: 800, rainbow: 1200 },
+  flair: { "EARLY BIRD": 200, "NIGHT OWL": 200, "GRINDER": 400, "LOCKED IN": 600 },
+  theme: { ocean: 1000, sunset: 1000 },
+};
+app.post("/api/shop/buy", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const { slot, item } = req.body;
+  const price = SHOP[slot]?.[item];
+  if (price === undefined) return res.status(404).json({ error: "no such item" });
+  u.owned = u.owned || [];
+  const key = slot + ":" + item;
+  if (u.owned.includes(key)) return res.status(400).json({ error: "already owned" });
+  if (u.coins < price) return res.status(400).json({ error: `Not enough coins — need ${price - u.coins} more` });
+  u.coins -= price;
+  u.owned.push(key);
+  u.equipped = u.equipped || {};
+  u.equipped[slot] = item; // auto-equip on purchase
+  save();
+  res.json({ ok: true, coins: u.coins });
+});
+app.post("/api/shop/equip", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const { slot, item } = req.body;
+  u.equipped = u.equipped || {};
+  if (item === null || item === "") delete u.equipped[slot];
+  else if ((u.owned || []).includes(slot + ":" + item)) u.equipped[slot] = item;
+  else return res.status(400).json({ error: "not owned" });
+  save();
+  res.json({ ok: true });
+});
+
+// ---------- group chat (capped ring buffer per group) ----------
+app.post("/api/chat", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const g = db.groups[req.body.groupCode];
+  if (!g || !g.members.includes(u.id)) return res.status(404).json({ error: "not in group" });
+  const text = String(req.body.text || "").trim().slice(0, 500);
+  if (!text) return res.status(400).json({ error: "empty" });
+  g.msgs = g.msgs || [];
+  g.msgs.push({ uid: u.id, text, at: Date.now() });
+  if (g.msgs.length > 200) g.msgs = g.msgs.slice(-200);
+  save();
+  res.json({ ok: true });
+});
+
 app.post("/api/presence", (req, res) => {
   const u = auth(req, res); if (!u) return;
   presence[u.id] = { studying: !!req.body.studying, activity: String(req.body.activity || "").slice(0, 32), elapsed: Number(req.body.elapsed) || 0, lastSeen: Date.now() };
@@ -160,7 +207,10 @@ app.get("/api/state", (req, res) => {
     const p = presence[m];
     const live = p && now - p.lastSeen < 20000;
     return mu && {
-      id: mu.id, name: mu.name, avatar: mu.avatar || 0, avatarImg: mu.avatarImg || null, coins: mu.coins, totalSeconds: mu.totalSeconds,
+      id: mu.id, name: mu.name, avatar: mu.avatar || 0, avatarImg: mu.avatarImg || null,
+      frame: mu.equipped?.frame || null, flair: mu.equipped?.flair || null,
+      owned: m === u.id ? (mu.owned || []) : undefined, theme: m === u.id ? mu.equipped?.theme || null : undefined,
+      coins: mu.coins, totalSeconds: mu.totalSeconds,
       streak: currentStreak(mu), today: mu.dayTotals[today()] || 0,
       week: last7(mu).reduce((a, b) => a + b, 0), days: last7(mu), studying: !!(live && p.studying),
       activity: live && p.studying ? p.activity : null, elapsed: live && p.studying ? p.elapsed : 0,
@@ -174,6 +224,7 @@ app.get("/api/state", (req, res) => {
     if (!g) return null;
     return {
       code, name: g.name,
+      msgs: (g.msgs || []).slice(-50).map(m => ({ uid: m.uid, name: db.users[m.uid]?.name || "?", avatar: db.users[m.uid]?.avatar || 0, avatarImg: db.users[m.uid]?.avatarImg || null, text: m.text, at: m.at })),
       members: g.members.map(pub).filter(Boolean),
       challenges: Object.values(db.challenges).filter(c => c.groupCode === code)
         .map(c => ({ ...c, winnerName: c.winner === "team" ? "team" : db.users[c.winner]?.name || null, streaks: c.type === "streak" ? Object.fromEntries(g.members.map(m => [m, currentStreak(db.users[m] || {})])) : undefined })),
