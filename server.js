@@ -48,7 +48,35 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
 function currentStreak(u) {
   if (!u.lastStudyDay) return 0;
   const gap = daysBetween(u.lastStudyDay, today());
-  return gap <= 1 ? u.streak : 0; // streak survives until a full day is missed
+  if (gap <= 1) return u.streak;
+  if (gap === 2 && (u.freezes || 0) > 0) return u.streak; // protected by a streak freeze
+  return 0;
+}
+
+// ---------- daily quests (seeded per day, verified server-side) ----------
+function questDefs(dateStr) {
+  let h = 0;
+  for (const c of dateStr) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const mins = [30, 45, 60, 90][h % 4];
+  const sess = 2 + (h % 2);
+  const early = h % 2 === 0;
+  return [
+    { id: 0, title: `Study ${mins} minutes today`, target: mins, reward: mins },
+    { id: 1, title: `Complete ${sess} focus sessions`, target: sess, reward: 20 + sess * 15 },
+    { id: 2, title: early ? "Log a session before noon" : "Log a session after 8 PM", target: 1, reward: 50, window: early ? "early" : "late" },
+  ];
+}
+function questState(u) {
+  const d = today();
+  const flags = u.qFlags?.date === d ? u.qFlags : {};
+  const claimed = u.qClaimed?.date === d ? u.qClaimed.ids : [];
+  return questDefs(d).map(q => {
+    let progress = 0;
+    if (q.id === 0) progress = Math.floor((u.dayTotals[d] || 0) / 60);
+    if (q.id === 1) progress = u.sessToday?.date === d ? u.sessToday.n : 0;
+    if (q.id === 2) progress = flags[q.window] ? 1 : 0;
+    return { ...q, progress: Math.min(progress, q.target), done: progress >= q.target, claimed: claimed.includes(q.id) };
+  });
 }
 
 // ---------- routes ----------
@@ -152,6 +180,61 @@ app.post("/api/shop/equip", (req, res) => {
   res.json({ ok: true });
 });
 
+app.post("/api/shop/freeze", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if ((u.freezes || 0) >= 2) return res.status(400).json({ error: "Max 2 freezes held" });
+  if (u.coins < 400) return res.status(400).json({ error: `Not enough coins — need ${400 - u.coins} more` });
+  u.coins -= 400; u.freezes = (u.freezes || 0) + 1;
+  save();
+  res.json({ ok: true, freezes: u.freezes, coins: u.coins });
+});
+
+app.post("/api/quest/claim", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const q = questState(u).find(x => x.id === Number(req.body.id));
+  if (!q) return res.status(404).json({ error: "no such quest" });
+  if (!q.done) return res.status(400).json({ error: "quest not complete yet" });
+  if (q.claimed) return res.status(400).json({ error: "already claimed" });
+  const d = today();
+  u.qClaimed = u.qClaimed?.date === d ? u.qClaimed : { date: d, ids: [] };
+  u.qClaimed.ids.push(q.id);
+  u.coins += q.reward;
+  save();
+  res.json({ ok: true, reward: q.reward, coins: u.coins });
+});
+
+// ---------- group focus rooms (synced pomodoro) ----------
+app.post("/api/room/start", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const g = db.groups[req.body.groupCode];
+  if (!g || !g.members.includes(u.id)) return res.status(404).json({ error: "not in group" });
+  const mins = Math.max(5, Math.min(180, Number(req.body.minutes) || 25));
+  g.room = { mode: mins * 60, startAt: Date.now(), by: u.id };
+  save();
+  res.json({ ok: true });
+});
+app.post("/api/room/stop", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const g = db.groups[req.body.groupCode];
+  if (g && g.room && (g.room.by === u.id)) { delete g.room; save(); }
+  res.json({ ok: true });
+});
+
+// ---------- nudges (poke an idle friend; delivered once via state) ----------
+const nudgeLimit = {}; // "fromId>toId" -> ts
+app.post("/api/nudge", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const target = db.users[req.body.toId];
+  if (!target) return res.status(404).json({ error: "no such user" });
+  const key = u.id + ">" + target.id;
+  if (nudgeLimit[key] && Date.now() - nudgeLimit[key] < 3600e3) return res.status(429).json({ error: "Already nudged them recently" });
+  nudgeLimit[key] = Date.now();
+  target.nudges = (target.nudges || []).slice(-9);
+  target.nudges.push({ from: u.name, at: Date.now() });
+  save();
+  res.json({ ok: true });
+});
+
 // ---------- group chat (capped ring buffer per group) ----------
 app.post("/api/chat", (req, res) => {
   const u = auth(req, res); if (!u) return;
@@ -182,9 +265,24 @@ app.post("/api/session", (req, res) => {
   const coinsEarned = Math.floor(seconds / 60);
   u.coins += coinsEarned;
   if (u.lastStudyDay !== d) {
-    u.streak = u.lastStudyDay && daysBetween(u.lastStudyDay, d) === 1 ? u.streak + 1 : 1;
+    const gap = u.lastStudyDay ? daysBetween(u.lastStudyDay, d) : 99;
+    if (gap === 1) u.streak += 1;
+    else if (gap === 2 && (u.freezes || 0) > 0) { u.freezes--; u.streak += 1; } // freeze consumed, streak saved
+    else u.streak = 1;
     u.lastStudyDay = d;
   }
+  // quest + stats bookkeeping
+  u.sessToday = u.sessToday?.date === d ? { date: d, n: u.sessToday.n + 1 } : { date: d, n: 1 };
+  const hr = new Date().getHours();
+  u.qFlags = u.qFlags?.date === d ? u.qFlags : { date: d };
+  if (hr < 12) u.qFlags.early = true;
+  if (hr >= 20) u.qFlags.late = true;
+  const subj = (String(req.body.activity || "").trim().toLowerCase() || "other").slice(0, 32);
+  u.subjects = u.subjects || {};
+  u.subjects[subj] = (u.subjects[subj] || 0) + seconds;
+  u.hours = u.hours || Array(24).fill(0);
+  u.hours[hr] += seconds;
+  u.maxSession = Math.max(u.maxSession || 0, seconds);
   // challenge progress for every unfinished hour-based challenge in the user's groups
   for (const c of Object.values(db.challenges)) {
     if (c.winner || c.type === "streak" || !u.groups.includes(c.groupCode)) continue;
@@ -210,6 +308,7 @@ app.get("/api/state", (req, res) => {
       id: mu.id, name: mu.name, avatar: mu.avatar || 0, avatarImg: mu.avatarImg || null,
       frame: mu.equipped?.frame || null, flair: mu.equipped?.flair || null,
       owned: m === u.id ? (mu.owned || []) : undefined, theme: m === u.id ? mu.equipped?.theme || null : undefined,
+      freezes: m === u.id ? (mu.freezes || 0) : undefined,
       coins: mu.coins, totalSeconds: mu.totalSeconds,
       streak: currentStreak(mu), today: mu.dayTotals[today()] || 0,
       week: last7(mu).reduce((a, b) => a + b, 0), days: last7(mu), studying: !!(live && p.studying),
@@ -222,15 +321,26 @@ app.get("/api/state", (req, res) => {
   const groups = u.groups.map(code => {
     const g = db.groups[code];
     if (!g) return null;
+    if (g.room && now > g.room.startAt + g.room.mode * 1000 + 5000) delete g.room; // expired
     return {
       code, name: g.name,
+      room: g.room ? { ...g.room, byName: db.users[g.room.by]?.name || "?" } : null,
       msgs: (g.msgs || []).slice(-50).map(m => ({ uid: m.uid, name: db.users[m.uid]?.name || "?", avatar: db.users[m.uid]?.avatar || 0, avatarImg: db.users[m.uid]?.avatarImg || null, text: m.text, at: m.at })),
       members: g.members.map(pub).filter(Boolean),
       challenges: Object.values(db.challenges).filter(c => c.groupCode === code)
         .map(c => ({ ...c, winnerName: c.winner === "team" ? "team" : db.users[c.winner]?.name || null, streaks: c.type === "streak" ? Object.fromEntries(g.members.map(m => [m, currentStreak(db.users[m] || {})])) : undefined })),
     };
   }).filter(Boolean);
-  res.json({ me: pub(u.id), groups });
+  const me = pub(u.id);
+  me.quests = questState(u);
+  me.nudges = u.nudges || [];
+  if (u.nudges?.length) { u.nudges = []; save(); } // deliver once
+  // deep stats (self only)
+  me.days90 = Array.from({ length: 90 }, (_, i) => u.dayTotals[new Date(now - (89 - i) * 864e5).toISOString().slice(0, 10)] || 0);
+  me.subjects = Object.entries(u.subjects || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  me.hours = u.hours || Array(24).fill(0);
+  me.maxSession = u.maxSession || 0;
+  res.json({ me, groups });
 });
 
 // ---------- AI study assistant (OpenRouter proxy — key stays server-side) ----------
