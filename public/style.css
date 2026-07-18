@@ -320,10 +320,12 @@ body.break .btn.candy{background:linear-gradient(135deg,#3dff9a,#16a34a);box-sha
 .chal-win{display:flex;align-items:center;justify-content:center;gap:6px;color:var(--c-yellow);font-weight:900;font-size:13px;margin-top:10px;font-family:var(--display)}
 
 /* ---------- ambient sound chips ---------- */
-.amb-row{display:flex;gap:6px}
-.amb{background:var(--bg2);border:2px solid var(--line);color:var(--dim);border-radius:999px;padding:4px 11px;font-size:10.5px;font-weight:900;font-family:var(--display);letter-spacing:1px;cursor:pointer;transition:all var(--dur-1) var(--spring)}
+.amb-row{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;max-width:310px}
+.amb{background:var(--bg2);border:2px solid var(--line);color:var(--dim);border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;font-family:var(--display);cursor:pointer;transition:all var(--dur-1) var(--spring)}
 .amb:hover{color:var(--txt);transform:translateY(-1px)}
 .amb.active{border-color:var(--c-cyan);color:var(--c-cyan);background:#22d3ee1a;box-shadow:0 0 10px #22d3ee33}
+.amb-music.active{border-color:var(--c-purple);color:var(--c-purple);background:#a855f71f;box-shadow:0 0 12px #a855f744}
+.amb.playing::after{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-inline-start:5px;vertical-align:middle;animation:pulse 1.4s infinite}
 body.break .amb-row{display:none}
 
 /* ---------- avatar frames (shop) ---------- */

@@ -686,7 +686,8 @@ $("#btn-settings").onclick = () => {
     <div class="swatches" id="m-accent">${["violet", "green", "blue", "rose", "amber"].map(a =>
       `<span class="swatch ${S.accent === a ? "sel" : ""}" data-v="${a}" style="background:${{ violet: "#7c6cff", green: "#22c47d", blue: "#3f8cff", rose: "#f0568f", amber: "#f59e2d" }[a]}"></span>`).join("")}</div>
     ${row("Sound effects", "Subtle UI feedback sounds", `<label class="switch"><input type="checkbox" id="m-sfx" ${S.sfx ? "checked" : ""}><span class="sl"></span></label>`)}
-    ${row("Volume", "", `<input type="range" id="m-vol" min="0" max="1" step="0.1" value="${S.vol}">`)}
+    ${row("Volume", "أصوات الواجهة", `<input type="range" id="m-vol" min="0" max="1" step="0.1" value="${S.vol}">`)}
+    ${row("صوت الخلفية", "مستوى المطر/الروقان وغيره", `<input type="range" id="m-ambvol" min="0" max="1" step="0.05" value="${S.ambVol ?? 0.6}">`)}
     ${row("Notifications", "Desktop alert when a session or break ends", `<label class="switch"><input type="checkbox" id="m-notif" ${S.notif ? "checked" : ""}><span class="sl"></span></label>`)}
     ${row("Daily goal", "Minutes of focus per day", `<input type="number" id="m-goal" min="15" max="960" step="15" value="${S.goal}" style="width:84px">`)}
     ${row("Focus presets", "Three lengths, minutes", `<input id="m-lens" value="${S.lens.join(", ")}" style="width:110px">`)}
@@ -698,6 +699,9 @@ $("#btn-settings").onclick = () => {
       S.theme = $("#m-theme .sel")?.dataset.v || "dark";
       S.accent = $("#m-accent .sel")?.dataset.v || "violet";
       S.sfx = $("#m-sfx").checked; S.vol = Number($("#m-vol").value);
+      const prevAmbVol = S.ambVol;
+      S.ambVol = Number($("#m-ambvol").value);
+      if (amb && S.ambVol !== prevAmbVol) startAmbient(); // restart so the per-preset trim applies
       S.goal = Math.max(15, Number($("#m-goal").value) || 180);
       S.offline = $("#m-off").checked; S.hideAct = $("#m-hact").checked;
       const parseLens = (v, cur) => { const l = v.split(",").map(x => Math.min(600, Math.max(1, parseInt(x)))).filter(Boolean).slice(0, 3); return l.length ? l : cur; };
@@ -839,65 +843,259 @@ if (S.examDate) $("#ai-examdate").value = S.examDate;
 $("#ai-exam").onchange = (e) => { S.exam = e.target.value; saveS(); };
 $("#ai-examdate").onchange = (e) => { S.examDate = e.target.value; saveS(); renderGreeting(); };
 
-// ---------- ambient focus sounds (WebAudio noise synth, no assets) ----------
-let ambNodes = null;
-function makeNoiseBuffer(ctx, kind) {
-  const len = ctx.sampleRate * 2, buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
-  let last = 0;
+// ---------- ambient focus sounds (all synthesized live — no audio files) ----------
+let amb = null; // {master, layers[], lfos[], timers:Set, dead}
+// self-cleaning timeout: recurring schedulers would otherwise pile up thousands of dead handles per hour
+function ambLater(fn, ms) {
+  if (!amb || amb.dead) return;
+  const a = amb;
+  const id = setTimeout(() => { a.timers.delete(id); if (!a.dead) fn(); }, ms);
+  a.timers.add(id);
+}
+
+function noiseBuffer(ctx, kind, secs = 3) {
+  const len = Math.floor(ctx.sampleRate * secs);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+  let last = 0, b0 = 0, b1 = 0, b2 = 0;
   for (let i = 0; i < len; i++) {
-    const white = Math.random() * 2 - 1;
-    if (kind === "brown") { last = (last + 0.02 * white) / 1.02; d[i] = last * 3.5; }
-    else d[i] = white;
+    const w = Math.random() * 2 - 1;
+    if (kind === "brown") { last = (last + 0.02 * w) / 1.02; d[i] = last * 3.5; }
+    else if (kind === "pink") { b0 = 0.99765 * b0 + w * 0.099; b1 = 0.963 * b1 + w * 0.2965; b2 = 0.57 * b2 + w * 1.0526; d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.25; }
+    else d[i] = w;
   }
   return buf;
 }
+// cheap generated reverb — makes everything sound like a room instead of a buzzer
+function makeReverb(ctx, secs = 2.8, decay = 2.4) {
+  const len = Math.floor(ctx.sampleRate * secs);
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+  }
+  const conv = ctx.createConvolver(); conv.buffer = buf; return conv;
+}
+function noiseLayer(ctx, out, { kind = "brown", type = "lowpass", freq = 400, q = 0.7, gain = 1 }) {
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer(ctx, kind); src.loop = true;
+  const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+  const g = ctx.createGain(); g.gain.value = gain;
+  src.connect(f); f.connect(g); g.connect(out);
+  src.start();
+  return { src, filter: f, gain: g };
+}
+// slow random drift so loops never sound static
+function drift(ctx, param, base, depth, rate) {
+  const lfo = ctx.createOscillator(), lg = ctx.createGain();
+  lfo.frequency.value = rate; lg.gain.value = depth;
+  param.value = base;
+  lfo.connect(lg); lg.connect(param); lfo.start();
+  return lfo;
+}
+function ping(ctx, out, { freq, dur = 0.5, vel = 0.2, type = "sine", sweep = 0 }) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, ctx.currentTime);
+  if (sweep) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq * sweep), ctx.currentTime + dur);
+  g.gain.setValueAtTime(0.0001, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(vel, ctx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+  o.connect(g); g.connect(out);
+  o.start(); o.stop(ctx.currentTime + dur + 0.05);
+}
+
+// ---- procedural calm piano ("روقان") — original, generated on the fly ----
+const CHILL_CHORDS = [ // maj7 / min7 voicings, wide and sparse
+  [53, 57, 60, 64], // Fmaj7
+  [48, 52, 55, 59], // Cmaj7
+  [50, 53, 57, 60], // Dm7
+  [45, 48, 52, 55], // Am7
+  [46, 50, 53, 57], // Bbmaj7
+  [43, 47, 50, 55], // G
+];
+const midiHz = (n) => 440 * Math.pow(2, (n - 69) / 12);
+function pianoNote(ctx, out, midi, at, dur, vel) {
+  const f = midiHz(midi);
+  const o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), o3 = ctx.createOscillator();
+  const g = ctx.createGain(), g2 = ctx.createGain(), g3 = ctx.createGain();
+  o1.type = "triangle"; o1.frequency.value = f;
+  o2.type = "sine"; o2.frequency.value = f * 2.002; g2.gain.value = 0.3;  // shimmer
+  o3.type = "sine"; o3.frequency.value = f * 0.5; g3.gain.value = 0.18;   // body
+  o1.connect(g); o2.connect(g2); g2.connect(g); o3.connect(g3); g3.connect(g);
+  g.connect(out);
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.exponentialRampToValueAtTime(vel, at + 0.015);
+  g.gain.exponentialRampToValueAtTime(vel * 0.35, at + 0.35);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  [o1, o2, o3].forEach(o => { o.start(at); o.stop(at + dur + 0.1); });
+}
+function scheduleChill(ctx, out, state) {
+  if (!amb || amb.dead) return;
+  const chord = CHILL_CHORDS[state.i % CHILL_CHORDS.length];
+  state.i++;
+  const now = ctx.currentTime + 0.05;
+  const vel = 0.16;
+  // sparse arpeggio, humanised timing
+  chord.forEach((n, k) => {
+    const at = now + k * (0.45 + Math.random() * 0.3);
+    pianoNote(ctx, out, n, at, 4.2 + Math.random(), vel * (0.75 + Math.random() * 0.35));
+  });
+  // occasional melody note an octave up
+  if (Math.random() < 0.75) {
+    const n = chord[1 + Math.floor(Math.random() * 3)] + 12;
+    pianoNote(ctx, out, n, now + 2.1 + Math.random() * 1.2, 3.4, vel * 0.7);
+  }
+  // soft bass root
+  pianoNote(ctx, out, chord[0] - 12, now, 5.5, vel * 0.55);
+  ambLater(() => scheduleChill(ctx, out, state), 6800 + Math.random() * 1400);
+}
+
+const AMB_BUILDERS = {
+  rain: (ctx, out) => {
+    const l = [
+      noiseLayer(ctx, out, { kind: "white", type: "bandpass", freq: 1300, q: 0.45, gain: 0.75 }),
+      noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 320, gain: 0.5 }),
+    ];
+    return { layers: l, lfos: [drift(ctx, l[0].filter.frequency, 1300, 260, 0.05)] };
+  },
+  storm: (ctx, out) => {
+    const l = [
+      noiseLayer(ctx, out, { kind: "white", type: "bandpass", freq: 1500, q: 0.4, gain: 0.8 }),
+      noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 220, gain: 0.9 }),
+    ];
+    const boom = () => { // distant thunder
+      if (!amb || amb.dead) return;
+      const g = ctx.createGain(); g.connect(out);
+      const n = ctx.createBufferSource(); n.buffer = noiseBuffer(ctx, "brown", 2.5);
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 140;
+      n.connect(f); f.connect(g);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.4);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 2.4);
+      n.start(); n.stop(ctx.currentTime + 2.6);
+      ambLater(boom, 14000 + Math.random() * 26000);
+    };
+    ambLater(boom, 6000 + Math.random() * 10000);
+    return { layers: l, lfos: [drift(ctx, l[0].filter.frequency, 1500, 400, 0.07)] };
+  },
+  fire: (ctx, out) => {
+    const l = [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 620, gain: 0.85 })];
+    const crackle = () => {
+      if (!amb || amb.dead) return;
+      const n = ctx.createBufferSource(); n.buffer = noiseBuffer(ctx, "white", 0.12);
+      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 1200 + Math.random() * 2600; f.Q.value = 3;
+      const g = ctx.createGain();
+      n.connect(f); f.connect(g); g.connect(out);
+      const t = ctx.currentTime;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.18 + Math.random() * 0.22, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09 + Math.random() * 0.13);
+      n.start(); n.stop(t + 0.3);
+      ambLater(crackle, 90 + Math.random() * 620);
+    };
+    crackle();
+    return { layers: l, lfos: [drift(ctx, l[0].gain.gain, 0.85, 0.18, 0.11)] };
+  },
+  night: (ctx, out) => {
+    const l = [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 170, gain: 0.7 })];
+    const cricket = () => {
+      if (!amb || amb.dead) return;
+      const base = 4200 + Math.random() * 900;
+      for (let k = 0; k < 3 + Math.floor(Math.random() * 3); k++) {
+        setTimeout(() => { if (amb && !amb.dead) ping(ctx, out, { freq: base, dur: 0.045, vel: 0.05, type: "square" }); }, k * 75);
+      }
+      ambLater(cricket, 900 + Math.random() * 2600);
+    };
+    cricket();
+    return { layers: l, lfos: [] };
+  },
+  forest: (ctx, out) => {
+    const l = [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 480, gain: 0.7 })];
+    const bird = () => {
+      if (!amb || amb.dead) return;
+      const f = 2200 + Math.random() * 1600;
+      ping(ctx, out, { freq: f, dur: 0.13, vel: 0.07, sweep: 1.45 });
+      if (Math.random() < 0.6) setTimeout(() => { if (amb && !amb.dead) ping(ctx, out, { freq: f * 1.1, dur: 0.1, vel: 0.05, sweep: 1.3 }); }, 170);
+      ambLater(bird, 2600 + Math.random() * 7000);
+    };
+    ambLater(bird, 1500);
+    return { layers: l, lfos: [drift(ctx, l[0].filter.frequency, 480, 190, 0.045)] };
+  },
+  cafe: (ctx, out) => {
+    const l = [
+      noiseLayer(ctx, out, { kind: "pink", type: "lowpass", freq: 850, gain: 0.75 }),
+      noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 240, gain: 0.4 }),
+    ];
+    const clink = () => {
+      if (!amb || amb.dead) return;
+      ping(ctx, out, { freq: 1900 + Math.random() * 1400, dur: 0.3, vel: 0.045, type: "triangle" });
+      ambLater(clink, 4000 + Math.random() * 11000);
+    };
+    ambLater(clink, 3000);
+    return { layers: l, lfos: [drift(ctx, l[0].gain.gain, 0.75, 0.22, 0.13)] };
+  },
+  waves: (ctx, out) => {
+    const l = [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 430, gain: 0.5 })];
+    return { layers: l, lfos: [drift(ctx, l[0].gain.gain, 0.55, 0.45, 0.085), drift(ctx, l[0].filter.frequency, 430, 220, 0.085)] };
+  },
+  deep: (ctx, out) => ({ layers: [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 250, gain: 1 })], lfos: [] }),
+  chill: (ctx, out) => { // piano + soft pad bed
+    const l = [noiseLayer(ctx, out, { kind: "brown", type: "lowpass", freq: 200, gain: 0.16 })];
+    scheduleChill(ctx, out, { i: Math.floor(Math.random() * CHILL_CHORDS.length) });
+    return { layers: l, lfos: [] };
+  },
+};
+
 function startAmbient() {
   stopAmbient();
-  if (S.amb === "off" || !S.sfx) return;
+  if (S.amb === "off" || !AMB_BUILDERS[S.amb]) return;
   try {
     actx = actx || new AudioContext();
     if (actx.state === "suspended") actx.resume();
-    const src = actx.createBufferSource();
-    src.buffer = makeNoiseBuffer(actx, S.amb === "rain" ? "white" : "brown");
-    src.loop = true;
-    const filt = actx.createBiquadFilter();
-    const g = actx.createGain();
-    g.gain.value = 0.0001;
-    if (S.amb === "rain") { filt.type = "bandpass"; filt.frequency.value = 1400; filt.Q.value = 0.4; }
-    else { filt.type = "lowpass"; filt.frequency.value = S.amb === "deep" ? 260 : 420; }
-    src.connect(filt); filt.connect(g); g.connect(actx.destination);
-    const target = 0.12 * S.vol * (S.amb === "rain" ? 0.8 : 1);
-    g.gain.exponentialRampToValueAtTime(Math.max(0.001, target), actx.currentTime + 1.2);
-    let lfo = null, lfoG = null;
-    if (S.amb === "waves") {
-      lfo = actx.createOscillator(); lfoG = actx.createGain();
-      lfo.frequency.value = 0.09; lfoG.gain.value = target * 0.55;
-      lfo.connect(lfoG); lfoG.connect(g.gain); lfo.start();
-    }
-    src.start();
-    ambNodes = { src, g, lfo };
-  } catch {}
+    const master = actx.createGain();
+    master.gain.value = 0.0001;
+    const rev = makeReverb(actx, S.amb === "chill" ? 3.4 : 2.2, S.amb === "chill" ? 2.2 : 3);
+    const wet = actx.createGain(); wet.gain.value = S.amb === "chill" ? 0.42 : 0.16;
+    master.connect(actx.destination);
+    master.connect(wet); wet.connect(rev); rev.connect(actx.destination);
+    amb = { master, timers: new Set(), layers: [], lfos: [], dead: false, kind: S.amb };
+    const built = AMB_BUILDERS[S.amb](actx, master);
+    amb.layers = built.layers || []; amb.lfos = built.lfos || [];
+    // per-preset trim so sparse textures aren't drowned out by dense ones (measured, not guessed)
+    const TRIM = { chill: 4.2, night: 1.35, forest: 1.3, cafe: 0.75, storm: 0.85 };
+    const target = Math.max(0.002, 0.22 * (S.ambVol ?? 0.6) * (TRIM[S.amb] || 1));
+    master.gain.exponentialRampToValueAtTime(target, actx.currentTime + 1.4);
+    $$(".amb").forEach(x => x.classList.toggle("playing", x.dataset.a === S.amb));
+  } catch { amb = null; }
 }
 function stopAmbient() {
-  if (!ambNodes) return;
+  $$(".amb").forEach(x => x.classList.remove("playing"));
+  if (!amb) return;
+  const a = amb; amb = null; a.dead = true;
+  a.timers.forEach(clearTimeout); a.timers.clear();
   try {
-    ambNodes.g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + 0.4);
-    const n = ambNodes;
-    setTimeout(() => { try { n.src.stop(); n.lfo?.stop(); } catch {} }, 500);
+    a.master.gain.cancelScheduledValues(actx.currentTime);
+    a.master.gain.setValueAtTime(Math.max(0.0002, a.master.gain.value), actx.currentTime);
+    a.master.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + 0.6);
   } catch {}
-  ambNodes = null;
+  setTimeout(() => {
+    try { a.layers.forEach(l => l.src.stop()); a.lfos.forEach(l => l.stop()); a.master.disconnect(); } catch {}
+  }, 800);
 }
 S.amb = S.amb || "off";
+S.ambVol = S.ambVol ?? 0.6;
 $$(".amb").forEach(b => { b.classList.toggle("active", b.dataset.a === S.amb); });
 $("#amb-row").onclick = (e) => {
   const b = e.target.closest(".amb"); if (!b) return;
+  const same = S.amb === b.dataset.a;
   S.amb = b.dataset.a; saveS();
   $$(".amb").forEach(x => x.classList.toggle("active", x === b));
-  if (studyingNow()) startAmbient(); else stopAmbient();
+  // preview it immediately even outside a session, so you can pick one
+  if (S.amb === "off") stopAmbient();
+  else if (!same || !amb) startAmbient();
 };
-setInterval(() => { // keep ambient in sync with timer state
-  if (studyingNow() && S.amb !== "off" && S.sfx && !ambNodes) startAmbient();
-  if ((!studyingNow() || S.amb === "off" || !S.sfx) && ambNodes) stopAmbient();
+setInterval(() => { // ambient follows the focus timer once a session is running
+  if (studyingNow() && S.amb !== "off" && !amb) startAmbient();
+  if (timer.kind === "break" && amb) stopAmbient();
 }, 1000);
 
 // ---------- focus lock widget (Electron only) ----------
