@@ -1000,6 +1000,37 @@ function trackLayer(ctx, out, url, onEnd) {
   el.play().catch(e => onEnd && onEnd(e));
   return { el, gain: g, isTrack: true };
 }
+// measure the actual track loudness and correct the gain — any file lands at a comfortable level
+function autoLevel(layer, baseTarget) {
+  const a = amb;
+  const an = actx.createAnalyser(); an.fftSize = 2048;
+  layer.gain.connect(an);
+  const buf = new Float32Array(an.fftSize);
+  // A single reading gets fooled by quiet intros (Surreal Forest starts near-silent, then the music
+  // hits 5x louder), so keep sampling and track the loudest part heard so far.
+  const TARGET_RMS = 0.045;                 // matches the synth beds (measured)
+  let loudest = 0, applied = baseTarget;
+  const sample = () => {
+    if (!a || a.dead) { try { layer.gain.disconnect(an); } catch {} return; }
+    let win = 0;
+    for (let s = 0; s < 4; s++) {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      win = Math.max(win, Math.sqrt(sum / buf.length));
+    }
+    if (win > 0.0008) {
+      loudest = Math.max(loudest * 0.99, win); // decays slowly so a long quiet section eventually counts
+      const corr = Math.min(8, Math.max(0.04, TARGET_RMS / loudest));
+      const want = Math.max(0.002, baseTarget * corr);
+      if (Math.abs(want - applied) / applied > 0.15) {
+        applied = want;
+        try { a.master.gain.exponentialRampToValueAtTime(want, actx.currentTime + 1.5); } catch {}
+      }
+    }
+    ambLater(sample, 1500);
+  };
+  ambLater(sample, 700);
+}
 function showNowPlaying(label) {
   const np = $("#now-playing");
   if (!label) { np.classList.add("hidden"); np.innerHTML = ""; return; }
@@ -1103,30 +1134,59 @@ const AMB_BUILDERS = {
   },
 };
 
+function trackFor(key) { // resolve a track preset to {url, label} or null
+  if (BUNDLED_TRACKS[key]) return { url: BUNDLED_TRACKS[key].src, label: BUNDLED_TRACKS[key].name };
+  if (key.startsWith("mine:")) {
+    const t = myTracks.find(x => x.id === key.slice(5));
+    return t ? { url: URL.createObjectURL(t.blob), label: t.name, revoke: true } : null;
+  }
+  return null;
+}
 function startAmbient() {
   stopAmbient();
-  if (S.amb === "off" || !AMB_BUILDERS[S.amb]) return;
+  if (S.amb === "off") return;
+  const track = trackFor(S.amb);
+  if (!track && !AMB_BUILDERS[S.amb]) { S.amb = "off"; saveS(); return; }
   try {
     actx = actx || new AudioContext();
     if (actx.state === "suspended") actx.resume();
     const master = actx.createGain();
     master.gain.value = 0.0001;
-    const rev = makeReverb(actx, S.amb === "chill" ? 3.4 : 2.2, S.amb === "chill" ? 2.2 : 3);
-    const wet = actx.createGain(); wet.gain.value = S.amb === "chill" ? 0.42 : 0.16;
-    master.connect(actx.destination);
-    master.connect(wet); wet.connect(rev); rev.connect(actx.destination);
-    amb = { master, timers: new Set(), layers: [], lfos: [], dead: false, kind: S.amb };
-    const built = AMB_BUILDERS[S.amb](actx, master);
-    amb.layers = built.layers || []; amb.lfos = built.lfos || [];
-    // per-preset trim so sparse textures aren't drowned out by dense ones (measured, not guessed)
-    const TRIM = { chill: 4.2, night: 1.35, forest: 1.3, cafe: 0.75, storm: 0.85 };
-    const target = Math.max(0.002, 0.22 * (S.ambVol ?? 0.6) * (TRIM[S.amb] || 1));
+    const isChill = S.amb === "chill";
+    const rev = makeReverb(actx, isChill ? 3.4 : 2.2, isChill ? 2.2 : 3);
+    const wet = actx.createGain(); wet.gain.value = track ? 0.05 : isChill ? 0.42 : 0.16; // real recordings already have space
+    // limiter: recordings vary wildly in level, and boosting them must never clip
+    const lim = actx.createDynamicsCompressor();
+    lim.threshold.value = -6; lim.knee.value = 6; lim.ratio.value = 12; lim.attack.value = 0.004; lim.release.value = 0.2;
+    lim.connect(actx.destination);
+    master.connect(lim);
+    master.connect(wet); wet.connect(rev); rev.connect(lim);
+    amb = { master, timers: new Set(), layers: [], lfos: [], dead: false, kind: S.amb, url: track?.revoke ? track.url : null };
+    let target;
+    if (track) {
+      const layer = trackLayer(actx, master, track.url, () => toast("ما قدر يشغل الملف"));
+      amb.layers = [layer];
+      // files vary hugely in mastering level (field recordings are quiet, music is loud),
+      // so start conservative then auto-level to match the synth beds
+      target = Math.max(0.002, 1.0 * (S.ambVol ?? 0.6));
+      autoLevel(layer, target);
+      showNowPlaying(track.label);
+    } else {
+      const built = AMB_BUILDERS[S.amb](actx, master);
+      amb.layers = built.layers || []; amb.lfos = built.lfos || [];
+      // per-preset trim so sparse textures aren't drowned out by dense ones (measured, not guessed)
+      const TRIM = { chill: 4.2, night: 1.35, forest: 1.3, cafe: 0.75, storm: 0.85 };
+      target = Math.max(0.002, 0.22 * (S.ambVol ?? 0.6) * (TRIM[S.amb] || 1));
+      showNowPlaying(isChill ? "بيانو هادئ" : null);
+    }
     master.gain.exponentialRampToValueAtTime(target, actx.currentTime + 1.4);
     $$(".amb").forEach(x => x.classList.toggle("playing", x.dataset.a === S.amb));
-  } catch { amb = null; }
+    $("#amb-mine-btn").classList.toggle("playing", String(S.amb).startsWith("mine:"));
+  } catch (e) { amb = null; showNowPlaying(null); }
 }
 function stopAmbient() {
   $$(".amb").forEach(x => x.classList.remove("playing"));
+  showNowPlaying(null);
   if (!amb) return;
   const a = amb; amb = null; a.dead = true;
   a.timers.forEach(clearTimeout); a.timers.clear();
@@ -1136,7 +1196,12 @@ function stopAmbient() {
     a.master.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + 0.6);
   } catch {}
   setTimeout(() => {
-    try { a.layers.forEach(l => l.src.stop()); a.lfos.forEach(l => l.stop()); a.master.disconnect(); } catch {}
+    try {
+      a.layers.forEach(l => { if (l.isTrack) { l.el.pause(); l.el.src = ""; } else l.src.stop(); });
+      a.lfos.forEach(l => l.stop());
+      a.master.disconnect();
+      if (a.url) URL.revokeObjectURL(a.url);
+    } catch {}
   }, 800);
 }
 S.amb = S.amb || "off";
@@ -1151,6 +1216,54 @@ $("#amb-row").onclick = (e) => {
   if (S.amb === "off") stopAmbient();
   else if (!same || !amb) startAmbient();
 };
+// ---- your own music (stored locally on your device, never uploaded) ----
+$("#amb-mine-btn").onclick = () => showMusicLibrary();
+$("#music-file").onchange = async (e) => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (!files.length) return;
+  let added = 0;
+  for (const f of files) {
+    if (f.size > 25e6) { toast(`${f.name} كبير جداً (الحد ٢٥ ميجا)`); continue; }
+    try { const rec = await musicDB.add(f); myTracks.push(rec); added++; } catch { toast("ما قدرت أحفظ " + f.name); }
+  }
+  if (added) { sfx.coin(); toast(`انضاف ${added} مقطع`); }
+  showMusicLibrary();
+};
+function showMusicLibrary() {
+  const rows = myTracks.map(t => `
+    <div class="track-row ${S.amb === "mine:" + t.id ? "playing" : ""}">
+      <div style="min-width:0;flex:1"><div class="tname">${esc(t.name)}</div><div class="tmeta">${(t.size / 1e6).toFixed(1)} MB</div></div>
+      <button class="btn small pop-lime" data-play="${t.id}">${S.amb === "mine:" + t.id ? "شغال" : "شغّل"}</button>
+      <button class="track-x" data-del="${t.id}" title="حذف">✕</button>
+    </div>`).join("");
+  modal("موسيقاي", `
+    <p class="muted">أضف أي ملفات صوتية من جهازك — تنحفظ على جهازك فقط وما ترفع لأي سيرفر.</p>
+    ${rows || `<div class="empty">${EMPTY_RING}<span>ما فيه مقاطع بعد</span></div>`}
+    <button class="btn candy wide" id="music-add" style="margin-top:14px">＋ أضف ملفات</button>
+    <div class="credits">
+      <b style="color:var(--muted)">المقاطع المضمّنة:</b><br>
+      «جدول في غابة» — kvgarlic، عبر chosic.com<br>
+      «Surreal Forest» — Meydän، عبر chosic.com<br>
+      موسيقى حرة الاستخدام. أما ملفاتك الخاصة فتبقى على جهازك ولا تُوزّع مع التطبيق.
+    </div>`, async () => {}, "إغلاق");
+  $("#music-add").onclick = () => $("#music-file").click();
+  $("#modal-body").onclick = async (e) => {
+    const p = e.target.closest("[data-play]");
+    if (p) {
+      S.amb = "mine:" + p.dataset.play; saveS();
+      $$(".amb").forEach(x => x.classList.remove("active"));
+      $("#amb-mine-btn").classList.add("active");
+      startAmbient(); closeModal(); return;
+    }
+    const d = e.target.closest("[data-del]");
+    if (d) {
+      const id = d.dataset.del;
+      if (S.amb === "mine:" + id) { S.amb = "off"; saveS(); stopAmbient(); }
+      try { await musicDB.remove(id); myTracks = myTracks.filter(t => t.id !== id); showMusicLibrary(); } catch { toast("ما قدرت أحذف"); }
+    }
+  };
+}
+
 setInterval(() => { // ambient follows the focus timer once a session is running
   if (studyingNow() && S.amb !== "off" && !amb) startAmbient();
   if (timer.kind === "break" && amb) stopAmbient();
