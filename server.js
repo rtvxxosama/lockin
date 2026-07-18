@@ -367,6 +367,8 @@ app.get("/api/state", (req, res) => {
   if (u.nudges?.length) { u.nudges = []; save(); } // deliver once
   // deep stats (self only)
   me.days90 = Array.from({ length: 90 }, (_, i) => u.dayTotals[new Date(now - (89 - i) * 864e5).toISOString().slice(0, 10)] || 0);
+  me.exams = (u.exams || []).slice(-12);
+  me.weakTopics = weakTopics(u).slice(0, 6);
   me.subjects = Object.entries(u.subjects || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
   me.hours = u.hours || Array(24).fill(0);
   me.maxSession = u.maxSession || 0;
@@ -385,29 +387,90 @@ const AI_PREFERRED = [
   "nousresearch/hermes-3-llama-3.1-405b:free",
 ];
 let AI_MODELS = process.env.AI_MODELS ? process.env.AI_MODELS.split(",") : [...AI_PREFERRED];
+// vision-capable free models, for photo questions and scanned pages
+const VISION_PREFERRED = [
+  "nvidia/nemotron-nano-12b-v2-vl:free",
+  "qwen/qwen2.5-vl-72b-instruct:free",
+  "meta-llama/llama-3.2-11b-vision-instruct:free",
+  "google/gemma-3-27b-it:free",
+];
+let VISION_MODELS = process.env.VISION_MODELS ? process.env.VISION_MODELS.split(",") : [...VISION_PREFERRED];
 async function discoverFreeModels() {
   if (process.env.AI_MODELS) return;
   try {
     const j = await (await fetch("https://openrouter.ai/api/v1/models")).json();
-    const free = new Set(j.data.filter(m => m.id.endsWith(":free")).map(m => m.id));
+    const freeModels = j.data.filter(m => m.id.endsWith(":free"));
+    const free = new Set(freeModels.map(m => m.id));
     if (!free.size) return;
     const chain = AI_PREFERRED.filter(id => free.has(id));
     for (const id of free) { if (chain.length >= 8) break; if (!chain.includes(id)) chain.push(id); }
     AI_MODELS = chain;
     console.log(`AI models: ${chain.slice(0, 3).join(", ")} (+${Math.max(0, chain.length - 3)} fallbacks)`);
+    if (!process.env.VISION_MODELS) { // models that actually accept images
+      const canSee = new Set(freeModels.filter(m => (m.architecture?.input_modalities || []).includes("image")).map(m => m.id));
+      const vchain = [...VISION_PREFERRED.filter(id => canSee.has(id)), ...[...canSee].filter(id => !VISION_PREFERRED.includes(id))].slice(0, 6);
+      if (vchain.length) { VISION_MODELS = vchain; console.log(`Vision models: ${vchain.slice(0, 2).join(", ")} (+${Math.max(0, vchain.length - 2)})`); }
+    }
   } catch (e) { console.log("AI model discovery failed, using defaults:", e.message); }
 }
 discoverFreeModels();
 setInterval(discoverFreeModels, 12 * 3600e3);
-const aiUse = {}; // userId -> [timestamps], simple 30-req/hour limit
+const aiUse = {}; // userId -> [timestamps], simple 40-req/hour limit
+function rateOk(u, res, cost = 1) {
+  const now = Date.now();
+  aiUse[u.id] = (aiUse[u.id] || []).filter(t => now - t < 3600e3);
+  if (aiUse[u.id].length + cost > 40) { res.status(429).json({ error: "AI limit reached — try again in a bit" }); return false; }
+  for (let i = 0; i < cost; i++) aiUse[u.id].push(now);
+  return true;
+}
+// shared OpenRouter call with model fallback; `models` lets vision calls use a different chain
+async function callAI(messages, { maxTokens = 800, models = AI_MODELS } = {}) {
+  let lastErr = "AI unavailable";
+  for (const model of models) {
+    try {
+      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${AI_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.trim(), messages, max_tokens: maxTokens }),
+      });
+      const j = await r.json();
+      const text = j.choices?.[0]?.message?.content;
+      if (r.ok && text) return { text, model: model.trim() };
+      lastErr = j.error?.message || `model ${model.trim()} unavailable`;
+    } catch (e) { lastErr = e.message; }
+  }
+  throw new Error(lastErr);
+}
+// free models are sloppy: dig JSON out of prose/markdown fences
+function extractJson(text) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidates = [fenced?.[1], text];
+  for (const c of candidates) {
+    if (!c) continue;
+    const s = c.indexOf("["), sObj = c.indexOf("{");
+    const start = s >= 0 && (sObj < 0 || s < sObj) ? s : sObj;
+    if (start < 0) continue;
+    const open = c[start], close = open === "[" ? "]" : "}";
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < c.length; i++) {
+      const ch = c[i];
+      if (esc) { esc = false; continue; }
+      if (ch === "\\") { esc = true; continue; }
+      if (ch === '"') inStr = !inStr;
+      if (inStr) continue;
+      if (ch === open) depth++;
+      else if (ch === close && --depth === 0) {
+        try { return JSON.parse(c.slice(start, i + 1)); } catch { break; }
+      }
+    }
+  }
+  return null;
+}
 
 app.post("/api/ai", async (req, res) => {
   const u = auth(req, res); if (!u) return;
   if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server (set OPENROUTER_API_KEY)" });
-  const now = Date.now();
-  aiUse[u.id] = (aiUse[u.id] || []).filter(t => now - t < 3600e3);
-  if (aiUse[u.id].length >= 30) return res.status(429).json({ error: "AI limit reached — try again in a bit" });
-  aiUse[u.id].push(now);
+  if (!rateOk(u, res)) return;
 
   const history = (Array.isArray(req.body.messages) ? req.body.messages : [])
     .slice(-12)
@@ -425,6 +488,7 @@ app.post("/api/ai", async (req, res) => {
   const examLine = EXAMS[ctx.exam] ? `الطالب يستعد حالياً لـ: ${EXAMS[ctx.exam]}.` : "";
   const ctxBits = [
     examLine,
+    examMemory(u),
     ctx.daysLeft > 0 ? `باقي على اختباره ${Math.min(999, Number(ctx.daysLeft) | 0)} يوم.` : "",
     ctx.activity ? `He is currently studying: ${String(ctx.activity).slice(0, 64)}.` : "",
     ctx.todayMin > 0 ? `Focused ${Math.min(1440, Number(ctx.todayMin) | 0)} minutes today.` : "",
@@ -449,21 +513,157 @@ Hard rules:
 - Formatting: **bold**, \`code\`, "- " bullets only. No headers, no tables.`,
   }, ...history];
 
-  let lastErr = "AI unavailable";
-  for (const model of AI_MODELS) {
-    try {
-      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${AI_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: model.trim(), messages, max_tokens: 800 }),
-      });
-      const j = await r.json();
-      const text = j.choices?.[0]?.message?.content;
-      if (r.ok && text) return res.json({ reply: text, model: model.trim() });
-      lastErr = j.error?.message || `model ${model.trim()} unavailable`;
-    } catch (e) { lastErr = e.message; }
+  try {
+    const { text, model } = await callAI(messages);
+    res.json({ reply: text, model });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- exam memory: the tutor remembers every mock exam you've taken ----------
+function examMemory(u) {
+  const ex = u.exams || [];
+  if (!ex.length) return "";
+  const recent = ex.slice(-4);
+  const lines = recent.map(e => `${new Date(e.at).toISOString().slice(0, 10)}: ${e.title} — ${e.score}/100 (${e.correct}/${e.total} صح)`).join("؛ ");
+  const weak = weakTopics(u).slice(0, 4).map(w => `${w.topic} ${w.pct}%`).join("، ");
+  const trend = ex.length >= 2 ? (ex[ex.length - 1].score - ex[0].score >= 0 ? "متحسّن" : "متراجع") : "";
+  return `سجل اختباراته التجريبية داخل التطبيق (تذكّرها واستشهد بها): ${lines}.${weak ? ` أضعف مواضيعه: ${weak}.` : ""}${trend ? ` الاتجاه العام: ${trend}.` : ""}`;
+}
+function weakTopics(u) {
+  const t = u.topicStats || {};
+  return Object.entries(t)
+    .filter(([, v]) => v.total >= 3)
+    .map(([topic, v]) => ({ topic, pct: Math.round(v.correct / v.total * 100), total: v.total }))
+    .sort((a, b) => a.pct - b.pct);
+}
+
+// ---------- PDF / photo → text ----------
+async function docToText(dataUrl, filename) {
+  const m = /^data:([^;]+);base64,(.+)$/s.exec(dataUrl || "");
+  if (!m) throw new Error("bad file");
+  const [, mime, b64] = m;
+  const buf = Buffer.from(b64, "base64");
+  if (buf.length > 8e6) throw new Error("File too big (max 8MB)");
+  if (mime === "application/pdf" || /\.pdf$/i.test(filename || "")) {
+    const pdf = require("pdf-parse");
+    const out = await pdf(buf);
+    const text = (out.text || "").trim();
+    if (text.length < 40) throw new Error("Couldn't read text from that PDF — it may be scanned images. Try the photo option instead.");
+    return { kind: "text", text: text.slice(0, 24000) };
   }
-  res.status(502).json({ error: lastErr });
+  if (/^image\//.test(mime)) return { kind: "image", dataUrl };
+  if (/^text\//.test(mime)) return { kind: "text", text: buf.toString("utf8").slice(0, 24000) };
+  throw new Error("Unsupported file — use PDF, image, or text");
+}
+
+// ---------- generate a mock test (from a document or from a topic) ----------
+app.post("/api/exam/generate", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server" });
+  if (!rateOk(u, res, 3)) return;
+  const count = Math.max(3, Math.min(20, Number(req.body.count) || 10));
+  const exam = String(req.body.exam || "general").slice(0, 32);
+  let source = "", visionParts = null, title = String(req.body.title || "").slice(0, 60);
+  try {
+    if (req.body.file) {
+      const doc = await docToText(req.body.file, req.body.filename);
+      if (doc.kind === "text") source = doc.text;
+      else visionParts = [{ type: "text", text: "استخرج محتوى هذه الصورة (أسئلة أو مادة دراسية) كنص عربي/إنجليزي كامل، بدون شرح." }, { type: "image_url", image_url: { url: doc.dataUrl } }];
+      title = title || (req.body.filename || "ملفي").slice(0, 60);
+    } else {
+      source = String(req.body.topic || "").slice(0, 500);
+      title = title || source.slice(0, 60) || "اختبار تجريبي";
+    }
+    if (visionParts) {
+      const { text } = await callAI([{ role: "user", content: visionParts }], { maxTokens: 1500, models: VISION_MODELS });
+      source = text;
+    }
+    if (!source.trim()) return res.status(400).json({ error: "no content to build a test from" });
+
+    const sys = `أنت مُعِدّ اختبارات محترف لاختبارات قياس السعودية (${exam}). مهمتك: توليد أسئلة اختيار من متعدد بمستوى الاختبار الحقيقي، مبنية حصراً على المادة المعطاة.
+أخرج JSON فقط بدون أي نص قبله أو بعده، بهذا الشكل بالضبط:
+{"questions":[{"q":"نص السؤال","choices":["أ","ب","ج","د"],"answer":0,"topic":"اسم الموضوع","why":"سبب الجواب باختصار"}]}
+قواعد: ${count} أسئلة بالضبط · 4 خيارات لكل سؤال · "answer" رقم الخيار الصحيح (0-3) · "topic" موضوع مختصر بالعربي (مثل: الهندسة، التناظر اللفظي، الكيمياء العضوية) · "why" سطر واحد · لا تكرر سؤالاً · لا تخترع معلومات خارج المادة المعطاة.`;
+    const { text, model } = await callAI([
+      { role: "system", content: sys },
+      { role: "user", content: `المادة:\n${source.slice(0, 14000)}\n\nولّد ${count} أسئلة.` },
+    ], { maxTokens: 3000 });
+
+    const parsed = extractJson(text);
+    const qs = (parsed?.questions || (Array.isArray(parsed) ? parsed : []))
+      .filter(q => q && q.q && Array.isArray(q.choices) && q.choices.length >= 2)
+      .slice(0, count)
+      .map((q, i) => ({
+        i, q: String(q.q).slice(0, 600),
+        choices: q.choices.slice(0, 4).map(c => String(c).slice(0, 300)),
+        answer: Math.max(0, Math.min(q.choices.length - 1, Number(q.answer) || 0)),
+        topic: String(q.topic || "عام").slice(0, 40),
+        why: String(q.why || "").slice(0, 400),
+      }));
+    if (!qs.length) return res.status(502).json({ error: "AI couldn't build a clean test from that — try again or use a smaller file" });
+    res.json({ questions: qs, title, model });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ---------- submit a mock test: grade, predict score, remember ----------
+app.post("/api/exam/submit", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const qs = Array.isArray(req.body.questions) ? req.body.questions : [];
+  const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
+  if (!qs.length) return res.status(400).json({ error: "no questions" });
+  u.topicStats = u.topicStats || {};
+  let correct = 0;
+  const byTopic = {};
+  qs.forEach((q, i) => {
+    const ok = answers[i] === q.answer;
+    if (ok) correct++;
+    const t = String(q.topic || "عام").slice(0, 40);
+    byTopic[t] = byTopic[t] || { correct: 0, total: 0 };
+    byTopic[t].total++; if (ok) byTopic[t].correct++;
+    u.topicStats[t] = u.topicStats[t] || { correct: 0, total: 0 };
+    u.topicStats[t].total++; if (ok) u.topicStats[t].correct++;
+  });
+  const pct = correct / qs.length;
+  // predicted Qiyas score: accuracy is the driver, nudged by how much they've actually studied
+  const hoursWeek = Object.values(u.dayTotals || {}).slice(-7).reduce((a, b) => a + b, 0) / 3600;
+  const effort = Math.max(-3, Math.min(5, (hoursWeek - 7) * 0.7));
+  const history = u.exams || [];
+  const raw = 32 + pct * 62 + effort;
+  const score = Math.max(20, Math.min(99, Math.round(raw)));
+  const attempt = {
+    at: Date.now(), title: String(req.body.title || "اختبار تجريبي").slice(0, 60),
+    exam: String(req.body.exam || "general").slice(0, 32),
+    correct, total: qs.length, score,
+    topics: Object.entries(byTopic).map(([t, v]) => ({ t, c: v.correct, n: v.total })),
+  };
+  u.exams = [...history, attempt].slice(-30);
+  save();
+  res.json({
+    ...attempt,
+    weak: weakTopics(u).slice(0, 5),
+    prev: history.length ? history[history.length - 1].score : null,
+    review: qs.map((q, i) => ({ i, q: q.q, choices: q.choices, answer: q.answer, mine: answers[i], why: q.why, topic: q.topic, ok: answers[i] === q.answer })),
+  });
+});
+
+// ---------- photo question solver (vision) ----------
+app.post("/api/ai/vision", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server" });
+  if (!rateOk(u, res, 2)) return;
+  const img = String(req.body.image || "");
+  if (!/^data:image\/(png|jpeg|jpg|webp);base64,/.test(img)) return res.status(400).json({ error: "send a png/jpeg/webp image" });
+  if (img.length > 6e6) return res.status(400).json({ error: "Image too big — crop or shrink it" });
+  try {
+    const { text, model } = await callAI([{
+      role: "user",
+      content: [
+        { type: "text", text: `أنت مدرّس اختبارات قياس. في هذه الصورة سؤال (أو أكثر). لكل سؤال: اذكر الجواب الصحيح بوضوح أولاً، ثم الشرح المختصر، ثم الشورت كت للحل السريع في الاختبار. ${String(req.body.note || "").slice(0, 300)} بدون مجاملات، ومن دون حشو. استخدم **عريض** و"- " فقط للتنسيق.` },
+        { type: "image_url", image_url: { url: img } },
+      ],
+    }], { maxTokens: 1200, models: VISION_MODELS });
+    res.json({ reply: text, model });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 loadDb().catch(e => console.error("db load failed, using in-memory:", e.message)).finally(() => {
