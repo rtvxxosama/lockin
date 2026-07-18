@@ -9,13 +9,37 @@ const crypto = require("crypto");
 const PORT = process.env.PORT || 5050;
 const DB_FILE = path.join(process.env.DATA_DIR || __dirname, "db.json");
 
-// ---------- storage (ponytail: JSON file + debounced save; move to sqlite if >50 users) ----------
+// ---------- storage: JSON blob, persisted to Postgres when DATABASE_URL is set (survives Render restarts), file otherwise ----------
 let db = { users: {}, groups: {}, challenges: {} };
-try { db = JSON.parse(fs.readFileSync(DB_FILE, "utf8")); } catch {}
-let saveTimer = null;
+let pgPool = null;
+if (process.env.DATABASE_URL) {
+  const { Pool } = require("pg");
+  pgPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 3 });
+}
+async function loadDb() {
+  if (pgPool) {
+    await pgPool.query("CREATE TABLE IF NOT EXISTS lockin_db (id INT PRIMARY KEY, data JSONB NOT NULL, updated TIMESTAMPTZ DEFAULT now())");
+    const r = await pgPool.query("SELECT data FROM lockin_db WHERE id=1");
+    if (r.rows[0]) { db = r.rows[0].data; console.log("db loaded from Postgres"); return; }
+    console.log("Postgres empty — starting fresh (will persist there)");
+  }
+  try { db = JSON.parse(fs.readFileSync(DB_FILE, "utf8")); console.log("db loaded from file"); } catch {}
+}
+let saveTimer = null, saving = false, dirty = false;
+async function flush() {
+  if (saving) { dirty = true; return; }
+  saving = true;
+  const snapshot = JSON.stringify(db);
+  try {
+    fs.writeFileSync(DB_FILE, snapshot);
+    if (pgPool) await pgPool.query("INSERT INTO lockin_db (id, data, updated) VALUES (1, $1::jsonb, now()) ON CONFLICT (id) DO UPDATE SET data=$1::jsonb, updated=now()", [snapshot]);
+  } catch (e) { console.error("save failed:", e.message); }
+  saving = false;
+  if (dirty) { dirty = false; flush(); }
+}
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => fs.writeFileSync(DB_FILE, JSON.stringify(db)), 500);
+  saveTimer = setTimeout(flush, 500);
 }
 
 const presence = {}; // userId -> {studying, activity, elapsed, lastSeen}  (in-memory only)
@@ -436,4 +460,6 @@ Hard rules:
   res.status(502).json({ error: lastErr });
 });
 
-app.listen(PORT, () => console.log(`LockIn server on http://localhost:${PORT}${AI_KEY ? " (AI enabled)" : ""}`));
+loadDb().catch(e => console.error("db load failed, using in-memory:", e.message)).finally(() => {
+  app.listen(PORT, () => console.log(`LockIn server on http://localhost:${PORT}${AI_KEY ? " (AI enabled)" : ""}${pgPool ? " (Postgres)" : ""}`));
+});
