@@ -1,0 +1,9 @@
+# never commit live data — the server writes this, and committing it wipes real users on every deploy
+db.json
+db.json.*.corrupt
+
+# never commit secrets — set OPENROUTER_API_KEY as an environment variable on Render instead
+openrouter.key
+.env
+
+node_modules/

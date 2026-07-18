@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LockIn</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="confetti"></canvas>
+
+<!-- onboarding -->
+<div id="onboard" class="overlay hidden">
+  <div class="card onboard-card">
+    <div class="logo-big"><svg class="ic ic-lg" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg><span class="grad-text">LockIn</span></div>
+    <p class="muted center">Study together. Make it addictive.</p>
+    <label for="ob-name">Your name</label>
+    <input id="ob-name" maxlength="24" placeholder="e.g. Sam" autocomplete="off">
+    <label for="ob-server">Server address</label>
+    <input id="ob-server" placeholder="https://your-server.onrender.com" autocomplete="off">
+    <p class="hint">One friend runs the server (or deploy it free) — everyone enters the same address.</p>
+    <button id="ob-go" class="btn candy big wide">LET'S LOCK IN</button>
+    <p id="ob-err" class="err"></p>
+  </div>
+</div>
+
+<header>
+  <div class="logo"><svg class="ic" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg><span>LockIn</span></div>
+  <div class="greet-mini"><span id="greet-title">Hey</span><span id="greet-sub" class="muted"></span><span id="greet-date" class="hidden"></span></div>
+  <div class="header-stats">
+    <button class="pill profile-pill" id="btn-profile" title="Edit profile">
+      <span class="avatar av-sm" id="hdr-avatar">?</span><span id="hdr-name"></span><span class="lvl-chip" id="hdr-lvl">LV 1</span>
+    </button>
+    <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings"><svg class="ic" viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 .1-1 7.6 7.6 0 0 0-.1-1l2.1-1.7a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.7 7.7 0 0 0-1.7-1l-.4-2.6a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.6a7.7 7.7 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.5 11a7.6 7.6 0 0 0-.1 1 7.6 7.6 0 0 0 .1 1l-2.1 1.7a.5.5 0 0 0-.1.6l2 3.5c.1.2.4.3.6.2l2.5-1a7.7 7.7 0 0 0 1.7 1l.4 2.6c0 .2.2.4.5.4h4c.2 0 .5-.2.5-.4l.4-2.6a7.7 7.7 0 0 0 1.7-1l2.5 1c.2.1.5 0 .6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg></button>
+  </div>
+</header>
+
+<div id="warroom" class="warroom hidden">
+  <div class="wr-left"><span class="wr-days" id="wr-days">0</span><span class="wr-lab">يوم على اختبارك</span></div>
+  <div class="wr-mid"><div class="wr-msg" id="wr-msg"></div><div class="wr-bar"><i id="wr-bar-fill"></i></div></div>
+  <button id="wr-plan" class="btn small pop-pink">خطة الطوارئ</button>
+</div>
+
+<main class="bento">
+<div class="bcol bcol-left">
+  <!-- TIMER hero tile -->
+  <section class="tile tile-timer" id="tile-timer">
+    <div class="seg timer-seg" id="timer-seg" role="tablist">
+      <button class="sel" data-kind="focus"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-8-8V2Zm1 4v5.6l4.5 2.6-1 1.7L11 12.7V6h2Z"/></svg> FOCUS</button>
+      <button data-kind="break"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M4 3h13a4 4 0 0 1 0 8h-1.1A7 7 0 0 1 9 17a7 7 0 0 1-7-7V3h2Zm12 2v4h1a2 2 0 0 0 0-4h-1ZM3 19h14v2H3v-2Z"/></svg> BREAK</button>
+    </div>
+    <div class="ring-wrap">
+      <svg viewBox="0 0 200 200" class="ring">
+        <defs>
+          <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="var(--c-pink)"/><stop offset="50%" stop-color="var(--c-purple)"/><stop offset="100%" stop-color="var(--c-cyan)"/>
+          </linearGradient>
+          <linearGradient id="ringGradGo" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#3dff9a"/><stop offset="100%" stop-color="#a6f750"/>
+          </linearGradient>
+        </defs>
+        <g id="ring-ticks"></g>
+        <circle cx="100" cy="100" r="84" class="ring-bg"/>
+        <circle cx="100" cy="100" r="84" class="ring-fg" id="ring-fg"/>
+      </svg>
+      <div class="ring-center">
+        <div id="clock" class="clock">25:00</div>
+        <div id="clock-sub" class="clock-sub">ready</div>
+      </div>
+    </div>
+    <div class="mode-row" id="mode-row" role="tablist"></div>
+    <input id="activity" class="activity" maxlength="32" placeholder="What are you studying?" autocomplete="off">
+    <div class="amb-row" id="amb-row" title="Ambient sound while focusing">
+      <button class="amb active" data-a="off">OFF</button>
+      <button class="amb" data-a="rain">RAIN</button>
+      <button class="amb" data-a="deep">DEEP</button>
+      <button class="amb" data-a="waves">WAVES</button>
+    </div>
+    <button id="btn-coach" class="btn small pop-lime coach-btn"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 8-4v6h2V7L12 2ZM6 11.2V15c0 1.7 2.7 3 6 3s6-1.3 6-3v-3.8l-6 3-6-3Z"/></svg> وش أذاكر الحين؟</button>
+    <div id="coach-card" class="coach-card hidden"></div>
+    <div class="timer-actions">
+      <button id="btn-main" class="btn candy big">START</button>
+      <button id="btn-finish" class="btn ghost hidden">Finish</button>
+      <button id="btn-widget" class="btn ghost hidden" title="Floating mini-timer on top of other windows"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M14 3h7v7h-2V6.4l-7.3 7.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H7v10h10v-4h2v6H5V5Z"/></svg> PIN</button>
+    </div>
+    <div class="goal-line">
+      <div class="goal-text"><span id="goal-label">Daily goal</span><span id="goal-val">0m / 3h</span></div>
+      <div class="goal-bar"><i id="goal-fill"></i></div>
+      <div class="session-dots" id="session-dots" title="Focus sessions today"></div>
+    </div>
+    <div class="quests">
+      <div class="tile-title" style="margin-bottom:8px"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="m12 2 2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.3 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8L12 2Z"/></svg> DAILY QUESTS</div>
+      <div id="quest-list"></div>
+    </div>
+  </section>
+</div>
+
+<div class="bcol bcol-mid">
+  <!-- stat tiles -->
+  <div class="stat-triple">
+  <section class="tile tile-stat tile-streak" title="Current streak">
+    <svg class="ic stat-ic ic-flame" viewBox="0 0 24 24"><path d="M13.5 1.5s.75 2.25.75 4.5c0 2.16-1.35 3.75-3.53 3.75-2.19 0-3.72-1.59-3.72-3.75l.03-.36C4.9 8.18 3.75 10.94 3.75 13.5c0 4.56 3.69 8.25 8.25 8.25s8.25-3.69 8.25-8.25c0-5.56-2.67-10.52-6.75-12Z"/></svg>
+    <b id="hdr-streak" class="stat-big">0</b><span class="stat-lab">day streak</span>
+    <span id="streak-shield" class="shield-tag hidden" title="Streak freezes — auto-save your streak if you miss a day"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5l-8-3Z"/></svg><b>0</b></span>
+  </section>
+  <section class="tile tile-stat tile-coins" title="Coins — 1 per focused minute">
+    <svg class="ic stat-ic ic-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><text x="12" y="16" text-anchor="middle" class="coin-txt">¢</text></svg>
+    <b id="hdr-coins" class="stat-big">0</b><span class="stat-lab">coins</span>
+    <button id="btn-shop" class="btn small pop-pink shop-btn">SHOP</button>
+  </section>
+  <section class="tile tile-stat tile-xp" title="XP — level up by studying">
+    <svg class="ic stat-ic ic-star" viewBox="0 0 24 24"><path d="M12 2 9.1 8.6 2 9.3l5.4 4.8L5.8 21 12 17.3 18.2 21l-1.6-6.9L22 9.3l-7.1-.7L12 2Z"/></svg>
+    <b id="xp-lvl" class="stat-big">1</b><span class="stat-lab">level</span>
+    <div class="xp-mini"><i id="xp-mini-fill"></i></div>
+  </section>
+  </div>
+
+  <!-- stats + chart -->
+  <section class="tile tile-chart">
+    <div class="tile-head" style="margin-bottom:0"><div class="tile-title"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M3 13h4v8H3v-8Zm7-6h4v14h-4V7Zm7-4h4v18h-4V3Z"/></svg> LAST 7 DAYS</div><button id="btn-stats" class="btn small pop-cyan">MORE</button></div>
+    <div class="chart" id="chart" aria-label="Study hours per day, last 7 days"></div>
+    <div class="stat-row">
+      <div class="stat"><b id="st-today">0m</b><span>today</span></div>
+      <div class="stat"><b id="st-week">0m</b><span>week</span></div>
+      <div class="stat"><b id="st-best">0m</b><span>best</span></div>
+      <div class="stat"><b id="st-total">0m</b><span>total</span></div>
+    </div>
+  </section>
+
+  <!-- challenges -->
+  <section class="tile tile-chal">
+    <div class="tile-head">
+      <div class="tile-title"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg> CHALLENGES</div>
+      <button id="btn-newchal" class="btn small pop-pink">＋ NEW</button>
+    </div>
+    <div id="tab-challenges"><div id="chal-list"></div></div>
+  </section>
+
+  <!-- group chat -->
+  <section class="tile tile-chat">
+    <div class="tile-head">
+      <div class="tile-title"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M4 2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8l-6 5V4a2 2 0 0 1 2-2Z"/></svg> SQUAD CHAT</div>
+      <button id="btn-quiz" class="btn small pop-pink">⚡ QUIZ BATTLE</button>
+    </div>
+    <div id="chat-list" class="chat-list"></div>
+    <div class="chat-inputrow">
+      <input id="chat-input" maxlength="500" placeholder="Say something…" autocomplete="off">
+      <button id="chat-send" class="btn small pop-cyan">SEND</button>
+    </div>
+  </section>
+</div>
+
+<div class="bcol bcol-right">
+  <!-- live now -->
+  <section class="tile tile-live">
+    <div class="tile-title"><span class="live-dot"></span> LIVE NOW</div>
+    <div id="room-box"></div>
+    <div id="live-list" class="live-list"></div>
+  </section>
+
+  <!-- leaderboard -->
+  <section class="tile tile-board">
+    <div class="tile-head">
+      <div class="tile-title"><svg class="ic ic-xs" viewBox="0 0 24 24" ><path d="M5 3h14v2h3v4a5 5 0 0 1-5 5h-.42A6 6 0 0 1 13 17.92V20h4v2H7v-2h4v-2.08A6 6 0 0 1 7.42 14H7a5 5 0 0 1-5-5V5h3V3Zm14 4v3a3 3 0 0 0 3-3h-3ZM5 7H2a3 3 0 0 0 3 3V7Z"/></svg> LEADERBOARD</div>
+      <div class="group-btns">
+        <select id="group-select" aria-label="Group"></select>
+        <button id="btn-rival" class="btn small pop-pink" title="خصم افتراضي ينافسك">＋ RIVAL</button>
+        <button id="btn-invite" class="btn small pop-cyan">INVITE</button>
+        <button id="btn-newgroup" class="btn small pop-lime">＋ GROUP</button>
+      </div>
+    </div>
+    <div id="member-strip" class="member-strip"></div>
+    <div class="range-row">
+      <button class="range active" data-r="today">Today</button>
+      <button class="range" data-r="week">Week</button>
+      <button class="range" data-r="total">All time</button>
+    </div>
+    <div id="rank-line" class="rank-line hidden"></div>
+    <div id="tab-board">
+      <div id="podium" class="podium"></div>
+      <div id="board"></div>
+    </div>
+  </section>
+</div>
+</main>
+
+<!-- modal -->
+<div id="modal" class="overlay hidden">
+  <div class="card modal-card">
+    <div class="modal-head"><div class="card-title" id="modal-title"></div><button id="modal-x" class="icon-btn" aria-label="Close">✕</button></div>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="btn ghost">Cancel</button>
+      <button id="modal-ok" class="btn candy">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- session summary -->
+<div id="summary" class="overlay hidden">
+  <div class="card summary-card">
+    <div class="summary-glow"></div>
+    <div class="summary-title">SESSION COMPLETE</div>
+    <div class="summary-time" id="sum-time">25:00</div>
+    <div class="summary-act" id="sum-act"></div>
+    <div class="summary-stats">
+      <div class="sum-stat"><svg class="ic ic-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><text x="12" y="16" text-anchor="middle" class="coin-txt">¢</text></svg><b id="sum-coins">+0</b><span>coins</span></div>
+      <div class="sum-stat"><svg class="ic ic-flame" viewBox="0 0 24 24"><path d="M13.5 1.5s.75 2.25.75 4.5c0 2.16-1.35 3.75-3.53 3.75-2.19 0-3.72-1.59-3.72-3.75l.03-.36C4.9 8.18 3.75 10.94 3.75 13.5c0 4.56 3.69 8.25 8.25 8.25s8.25-3.69 8.25-8.25c0-5.56-2.67-10.52-6.75-12Z"/></svg><b id="sum-streak">0</b><span>streak</span></div>
+      <div class="sum-stat"><svg class="ic ic-star" viewBox="0 0 24 24"><path d="M12 2 9.1 8.6 2 9.3l5.4 4.8L5.8 21 12 17.3 18.2 21l-1.6-6.9L22 9.3l-7.1-.7L12 2Z"/></svg><b id="sum-xp">+0</b><span>xp</span></div>
+    </div>
+    <div class="summary-actions">
+      <button id="sum-break" class="btn ghost">Take a break</button>
+      <button id="sum-again" class="btn candy">KEEP GOING</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI assistant -->
+<button id="ai-fab" class="ai-fab" title="Study assistant" aria-label="Study assistant">
+  <svg class="ic" viewBox="0 0 24 24"><path d="M12 2l1.9 5.7L19.6 9l-5.7 1.9L12 16.6l-1.9-5.7L4.4 9l5.7-1.3L12 2Zm7 11 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Z"/></svg>
+</button>
+<aside id="ai-panel" class="ai-panel hidden" aria-label="Study assistant chat">
+  <div class="ai-head">
+    <div class="ai-title"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 2l1.9 5.7L19.6 9l-5.7 1.9L12 16.6l-1.9-5.7L4.4 9l5.7-1.3L12 2Z"/></svg> STUDY BUDDY</div>
+    <div>
+      <button id="ai-saved" class="icon-btn" title="دفتر الأخطاء" aria-label="Saved answers"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M6 2h12a1 1 0 0 1 1 1v19l-7-4-7 4V3a1 1 0 0 1 1-1Z"/></svg><span id="ai-saved-n" class="saved-n hidden">0</span></button>
+      <button id="ai-clear" class="icon-btn" title="Clear chat" aria-label="Clear chat"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7Zm3-4h6l1 2h4v2H2V5h4l1-2Z"/></svg></button>
+      <button id="ai-close" class="icon-btn" title="Close" aria-label="Close">✕</button>
+    </div>
+  </div>
+  <div class="ai-examrow">
+    <select id="ai-exam" aria-label="الاختبار">
+      <option value="general">مساعد عام</option>
+      <option value="qudurat-cbt">قدرات علمي — محوسب</option>
+      <option value="qudurat-paper">قدرات علمي — ورقي</option>
+      <option value="tahsili">تحصيلي علمي</option>
+      <option value="tahsili-early">تحصيلي مبكر (كفو)</option>
+      <option value="step">STEP إنجليزي</option>
+    </select>
+    <input type="date" id="ai-examdate" title="تاريخ اختبارك" aria-label="تاريخ الاختبار">
+  </div>
+  <div id="ai-msgs" class="ai-msgs">
+    <div class="ai-hello">اختر اختبارك فوق وحدد تاريخه — وبعدها اسأل أو اطلب تدريب.</div>
+  </div>
+  <div class="ai-chips" id="ai-chips-doc">
+    <button class="ai-chip chip-hot" data-d="test"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm-1 7V3.5L18.5 9H13Z"/></svg> اختبار من ملفي</button>
+    <button class="ai-chip chip-hot" data-d="photo"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9Zm3 5a6 6 0 1 1 0 12 6 6 0 0 1 0-12Zm0 2.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/></svg> حل من صورة</button>
+    <button class="ai-chip" data-d="history">سجل اختباراتي</button>
+    <button class="ai-chip" data-d="library">مكتبتي</button>
+  </div>
+  <input type="file" id="ai-file" accept="application/pdf,image/png,image/jpeg,image/webp,text/plain" class="hidden">
+  <input type="file" id="lib-file" accept="application/pdf,image/png,image/jpeg,image/webp,text/plain" class="hidden">
+  <input type="file" id="ai-photo" accept="image/png,image/jpeg,image/webp" class="hidden">
+  <div class="ai-chips" id="ai-chips">
+    <button class="ai-chip" data-p="quiz">درّبني بسؤال</button>
+    <button class="ai-chip" data-p="explain">اشرح لي</button>
+    <button class="ai-chip" data-p="plan">خطة للمتبقي</button>
+    <button class="ai-chip" data-p="weak">وين ضعفي؟</button>
+  </div>
+  <div class="ai-inputrow">
+    <button id="ai-mic" class="icon-btn" title="تكلم بدل ما تكتب" aria-label="Voice input"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2Z"/></svg></button>
+    <button id="ai-speak" class="icon-btn" title="اقرأ الردود بصوت" aria-label="Read replies aloud"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4ZM14 2.2v2.1c3.4.9 6 4 6 7.7s-2.6 6.8-6 7.7v2.1c4.6-1 8-5 8-9.8s-3.4-8.8-8-9.8Z"/></svg></button>
+    <textarea id="ai-input" rows="1" placeholder="اسأل أو قل \"ابدأ ٥٠ دقيقة رياضيات\"…" maxlength="2000"></textarea>
+    <button id="ai-send" class="btn candy" aria-label="Send"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M3 20v-6l10-2L3 10V4l19 8-19 8Z"/></svg></button>
+  </div>
+</aside>
+
+<!-- squad quiz battle -->
+<div id="quiz" class="overlay hidden">
+  <div class="quiz-shell">
+    <div class="quiz-top">
+      <div class="quiz-title" id="quiz-title">تحدي السرعة</div>
+      <div class="quiz-meta"><span class="quiz-count" id="quiz-count"></span><button id="quiz-x" class="icon-btn" aria-label="Close">✕</button></div>
+    </div>
+    <div class="quiz-timerbar"><i id="quiz-timer-fill"></i></div>
+    <div class="quiz-body" id="quiz-body"></div>
+    <div class="quiz-scores" id="quiz-scores"></div>
+  </div>
+</div>
+
+<!-- mock exam runner -->
+<div id="exam" class="overlay hidden">
+  <div class="exam-shell">
+    <div class="exam-top">
+      <div class="exam-title" id="exam-title">اختبار تجريبي</div>
+      <div class="exam-meta">
+        <span class="exam-timer" id="exam-timer">00:00</span>
+        <span class="exam-count" id="exam-count">1 / 10</span>
+        <button id="exam-quit" class="icon-btn" aria-label="Quit">✕</button>
+      </div>
+    </div>
+    <div class="exam-progress"><i id="exam-prog"></i></div>
+    <div class="exam-body" id="exam-body"></div>
+    <div class="exam-nav">
+      <button id="exam-prev" class="btn ghost">السابق</button>
+      <div class="exam-dots" id="exam-dots"></div>
+      <button id="exam-next" class="btn candy">التالي</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

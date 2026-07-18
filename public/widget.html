@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LockIn widget</title>
+<style>
+@font-face{font-family:"Outfit";src:url("fonts/Outfit.ttf") format("truetype-variations");font-weight:100 900}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:transparent;overflow:hidden;user-select:none;font-family:"Outfit","Segoe UI",sans-serif}
+.pill{
+  -webkit-app-region:drag;
+  display:flex;align-items:center;gap:12px;height:72px;margin:6px;padding:0 18px;
+  background:#1a0f2ef2;border:2px solid #ff4fa366;border-radius:999px;
+  box-shadow:0 8px 28px #000a,0 0 18px #ff4fa32e;color:#fdf4ff;
+}
+.dot{width:10px;height:10px;border-radius:50%;background:#7a689e;flex-shrink:0}
+.dot.on{background:#3dff9a;box-shadow:0 0 10px #3dff9a;animation:pulse 1.5s infinite}
+.dot.brk{background:#3dff9a}
+@keyframes pulse{50%{opacity:.35}}
+.mid{flex:1;min-width:0}
+.clock{font-size:26px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1.1}
+.sub{font-size:10.5px;color:#b9a8d8;font-weight:700;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.live{font-size:11px;color:#3dff9a;font-weight:800;white-space:nowrap}
+.x{-webkit-app-region:no-drag;background:none;border:0;color:#7a689e;font-size:15px;cursor:pointer;padding:4px}
+.x:hover{color:#fdf4ff}
+</style>
+</head>
+<body>
+<div class="pill">
+  <span class="dot" id="dot"></span>
+  <div class="mid">
+    <div class="clock" id="clock">--:--</div>
+    <div class="sub" id="sub">lockin</div>
+  </div>
+  <span class="live" id="live"></span>
+  <button class="x" id="x" title="Close">✕</button>
+</div>
+<script>
+"use strict";
+document.getElementById("x").onclick = () => window.lockin && window.lockin.closeWidget();
+const fmt = (s) => {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return h ? h + ":" + String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0") : String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0");
+};
+function tick() {
+  let w = {};
+  try { w = JSON.parse(localStorage.getItem("widgetState") || "{}"); } catch {}
+  const dot = document.getElementById("dot");
+  if (w.running) {
+    const el = w.pausedElapsed + (Date.now() - w.startAt) / 1000;
+    const shown = w.mode > 0 ? Math.max(0, w.mode - el) : el;
+    document.getElementById("clock").textContent = fmt(shown);
+    document.getElementById("sub").textContent = w.kind === "break" ? "break — recharge" : (w.activity || "locked in");
+    dot.className = "dot " + (w.kind === "break" ? "brk" : "on");
+  } else {
+    document.getElementById("clock").textContent = w.pausedElapsed > 0 ? fmt(w.mode > 0 ? w.mode - w.pausedElapsed : w.pausedElapsed) : "--:--";
+    document.getElementById("sub").textContent = w.pausedElapsed > 0 ? "paused" : "not running";
+    dot.className = "dot";
+  }
+  document.getElementById("live").textContent = w.liveN > 1 ? w.liveN + " live" : w.liveN === 1 ? "1 live" : "";
+}
+setInterval(tick, 500);
+tick();
+</script>
+</body>
+</html>
