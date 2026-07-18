@@ -16,17 +16,59 @@ if (process.env.DATABASE_URL) {
   const { Pool } = require("pg");
   pgPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 3 });
 }
+let storageReady = false; // never write until we KNOW what's already stored
 async function loadDb() {
   if (pgPool) {
-    await pgPool.query("CREATE TABLE IF NOT EXISTS lockin_db (id INT PRIMARY KEY, data JSONB NOT NULL, updated TIMESTAMPTZ DEFAULT now())");
-    const r = await pgPool.query("SELECT data FROM lockin_db WHERE id=1");
-    if (r.rows[0]) { db = r.rows[0].data; console.log("db loaded from Postgres"); return; }
-    console.log("Postgres empty — starting fresh (will persist there)");
+    // retry: a cold/sleeping DB must never be mistaken for an empty one
+    let lastErr;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        await pgPool.query("CREATE TABLE IF NOT EXISTS lockin_db (id INT PRIMARY KEY, data JSONB NOT NULL, updated TIMESTAMPTZ DEFAULT now())");
+        const r = await pgPool.query("SELECT data FROM lockin_db WHERE id=1");
+        if (r.rows[0]) {
+          db = r.rows[0].data; storageReady = true;
+          console.log(`db loaded from Postgres (${Object.keys(db.users || {}).length} users)`);
+          return;
+        }
+        // table exists and is genuinely empty — migrate a local file if we have one
+        try {
+          const raw = fs.readFileSync(DB_FILE, "utf8").replace(/^﻿/, "");
+          const fileDb = JSON.parse(raw);
+          if (Object.keys(fileDb.users || {}).length) {
+            db = fileDb;
+            console.log(`Postgres empty — migrating ${Object.keys(db.users).length} users from local file`);
+          }
+        } catch {}
+        storageReady = true;
+        console.log("Postgres ready (empty) — data will persist there");
+        return;
+      } catch (e) {
+        lastErr = e;
+        console.error(`Postgres connect attempt ${attempt}/4 failed: ${e.message}`);
+        if (attempt < 4) await new Promise(r => setTimeout(r, attempt * 2000));
+      }
+    }
+    // DATABASE_URL was set but unreachable. Starting empty would overwrite real data on the first save.
+    console.error(`FATAL: DATABASE_URL is set but unreachable (${lastErr?.message}). Refusing to start with an empty database — your data is safe, fix the connection string and redeploy.`);
+    process.exit(1);
   }
-  try { db = JSON.parse(fs.readFileSync(DB_FILE, "utf8")); console.log("db loaded from file"); } catch {}
+  if (!fs.existsSync(DB_FILE)) { storageReady = true; console.log("no db file yet — starting fresh"); return; }
+  const raw = fs.readFileSync(DB_FILE, "utf8").replace(/^﻿/, ""); // strip BOM (Windows editors add it)
+  try {
+    db = JSON.parse(raw);
+    storageReady = true;
+    console.log(`db loaded from file (${Object.keys(db.users || {}).length} users)`);
+  } catch (e) {
+    // never silently start empty on a readable-but-broken file — that would overwrite real data on the next save
+    const bak = DB_FILE + "." + Date.now() + ".corrupt";
+    try { fs.copyFileSync(DB_FILE, bak); } catch {}
+    console.error(`DB PARSE FAILED (${e.message}). Backed up to ${bak}. Refusing to overwrite — fix or delete the file, then restart.`);
+    process.exit(1);
+  }
 }
 let saveTimer = null, saving = false, dirty = false;
 async function flush() {
+  if (!storageReady) { console.error("refusing to save: storage never loaded cleanly"); return; } // guard against wiping real data
   if (saving) { dirty = true; return; }
   saving = true;
   const snapshot = JSON.stringify(db);
@@ -46,9 +88,17 @@ const presence = {}; // userId -> {studying, activity, elapsed, lastSeen}  (in-m
 
 const app = express();
 app.use(express.json({ limit: "1mb" })); // room for base64 avatar uploads (client resizes to 128px first)
-// serve the web version if the renderer folder is nearby (repo layout)
-const webDir = path.join(__dirname, "..", "app", "renderer");
-if (fs.existsSync(webDir)) app.use(express.static(webDir));
+// serve the web version — look in every plausible spot so it works regardless of repo layout / Root Directory
+const WEB_CANDIDATES = [
+  path.join(__dirname, "public"),                        // self-contained copy (works when only server/ is deployed)
+  path.join(__dirname, "..", "app", "renderer"),         // full-repo layout
+  path.join(__dirname, "..", "renderer"),
+  path.join(__dirname, "renderer"),
+  path.join(process.cwd(), "app", "renderer"),
+];
+const webDir = WEB_CANDIDATES.find(p => { try { return fs.existsSync(path.join(p, "index.html")); } catch { return false; } });
+if (webDir) { app.use(express.static(webDir)); console.log("web UI served from " + webDir); }
+else console.log("web UI not found (API only). Looked in: " + WEB_CANDIDATES.join(" , "));
 app.use((req, res, next) => { // CORS for dev/browser use
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -108,9 +158,19 @@ app.get("/api/health", (req, res) => res.json({
   ok: true, app: "lockin",
   storage: pgPool ? "postgres" : "file",
   hasDbUrl: !!process.env.DATABASE_URL,
+  storageReady,
   users: Object.keys(db.users).length,
-  version: "3.3",
+  groups: Object.keys(db.groups).length,
+  ai: !!AI_KEY,
+  version: "4.1",
 }));
+
+if (!webDir) app.get("/", (req, res) => res.status(200).type("html").send(
+  `<body style="font-family:system-ui;background:#0f0819;color:#f0f2fa;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center">
+   <div><h1 style="color:#ff4fa3">LockIn API is running</h1>
+   <p style="color:#98a0b6">The desktop app can connect to this address, but the browser version isn't deployed here.</p>
+   <p style="color:#5f677e;font-size:13px">To enable it: copy <code>app/renderer</code> into <code>server/public</code> and redeploy.</p>
+   <p><a href="/api/health" style="color:#22d3ee">/api/health</a></p></div></body>`));
 
 app.post("/api/register", (req, res) => {
   const name = String(req.body.name || "").trim().slice(0, 24);
@@ -352,9 +412,11 @@ app.get("/api/state", (req, res) => {
     const g = db.groups[code];
     if (!g) return null;
     if (g.room && now > g.room.startAt + g.room.mode * 1000 + 5000) delete g.room; // expired
+    if (g.quiz) quizPayout(g);
     return {
       code, name: g.name,
       room: g.room ? { ...g.room, byName: db.users[g.room.by]?.name || "?" } : null,
+      quiz: g.quiz ? { ...quizView(g, u.id), winner: g.quiz.winner || null, startsIn: Math.max(0, g.quiz.startedAt - now) } : null,
       msgs: (g.msgs || []).slice(-50).map(m => ({ uid: m.uid, name: db.users[m.uid]?.name || "?", avatar: db.users[m.uid]?.avatar || 0, avatarImg: db.users[m.uid]?.avatarImg || null, text: m.text, at: m.at })),
       members: g.members.map(pub).filter(Boolean),
       challenges: Object.values(db.challenges).filter(c => c.groupCode === code)
@@ -369,6 +431,8 @@ app.get("/api/state", (req, res) => {
   me.days90 = Array.from({ length: 90 }, (_, i) => u.dayTotals[new Date(now - (89 - i) * 864e5).toISOString().slice(0, 10)] || 0);
   me.exams = (u.exams || []).slice(-12);
   me.weakTopics = weakTopics(u).slice(0, 6);
+  me.library = (u.library || []).map(({ id, name, at, chars, topic }) => ({ id, name, at, chars, topic }));
+  me.rival = rivalStats(u);
   me.subjects = Object.entries(u.subjects || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
   me.hours = u.hours || Array(24).fill(0);
   me.maxSession = u.maxSession || 0;
@@ -565,7 +629,12 @@ app.post("/api/exam/generate", async (req, res) => {
   const exam = String(req.body.exam || "general").slice(0, 32);
   let source = "", visionParts = null, title = String(req.body.title || "").slice(0, 60);
   try {
-    if (req.body.file) {
+    if (req.body.libId) { // build from something already in your library
+      const it = (u.library || []).find(x => x.id === req.body.libId);
+      if (!it) return res.status(404).json({ error: "الملف مو موجود في مكتبتك" });
+      source = it.text;
+      title = title || it.name;
+    } else if (req.body.file) {
       const doc = await docToText(req.body.file, req.body.filename);
       if (doc.kind === "text") source = doc.text;
       else visionParts = [{ type: "text", text: "استخرج محتوى هذه الصورة (أسئلة أو مادة دراسية) كنص عربي/إنجليزي كامل، بدون شرح." }, { type: "image_url", image_url: { url: doc.dataUrl } }];
@@ -663,6 +732,211 @@ app.post("/api/ai/vision", async (req, res) => {
       ],
     }], { maxTokens: 1200, models: VISION_MODELS });
     res.json({ reply: text, model });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- personal material library (your own PDFs/notes become the question source) ----------
+app.post("/api/library/add", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!rateOk(u, res, 2)) return;
+  try {
+    const doc = await docToText(req.body.file, req.body.filename);
+    let text = doc.kind === "text" ? doc.text : null;
+    if (!text) {
+      if (!AI_KEY) return res.status(503).json({ error: "AI not configured — images need vision" });
+      const out = await callAI([{
+        role: "user",
+        content: [{ type: "text", text: "استخرج كل النص المفيد من هذه الصورة كما هو (أسئلة أو مادة دراسية)، بدون شرح أو تعليق." },
+          { type: "image_url", image_url: { url: doc.dataUrl } }],
+      }], { maxTokens: 1800, models: VISION_MODELS });
+      text = out.text;
+    }
+    text = (text || "").trim();
+    if (text.length < 40) return res.status(400).json({ error: "ما قدرت أقرأ نص كافٍ من الملف" });
+    u.library = u.library || [];
+    if (u.library.length >= 12) return res.status(400).json({ error: "المكتبة ممتلئة (12 ملف) — احذف واحد أولاً" });
+    const item = {
+      id: id(), name: String(req.body.filename || "ملف").slice(0, 60),
+      at: Date.now(), chars: text.length, text: text.slice(0, 40000),
+      topic: String(req.body.topic || "").slice(0, 40),
+    };
+    u.library.push(item);
+    save();
+    res.json({ ok: true, id: item.id, chars: item.chars });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post("/api/library/remove", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  u.library = (u.library || []).filter(x => x.id !== req.body.id);
+  save();
+  res.json({ ok: true });
+});
+
+// ---------- AI coach: assigns your next session from real weak-topic data ----------
+app.post("/api/coach/assign", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const weak = weakTopics(u);
+  const daysLeft = Math.max(0, Number(req.body.daysLeft) || 0);
+  const goalMin = Math.max(15, Number(req.body.goalMin) || 180);
+  const doneToday = Math.floor((u.dayTotals[today()] || 0) / 60);
+  const remaining = Math.max(0, goalMin - doneToday);
+  // length: longer blocks when the exam is close and there's ground to cover
+  let minutes = remaining <= 0 ? 25 : Math.min(90, Math.max(25, Math.round(remaining / 2 / 5) * 5));
+  if (daysLeft && daysLeft <= 7) minutes = Math.min(90, Math.max(minutes, 50));
+  const target = weak[0];
+  const focus = target ? target.topic : (req.body.exam === "step" ? "استيعاب المقروء" : "تأسيس عام");
+  let why;
+  if (target) why = `إتقانك في ${target.topic} ${target.pct}% من ${target.total} سؤال — أضعف نقطة عندك.`;
+  else if ((u.exams || []).length) why = "ما فيه بيانات كافية لتحديد ضعفك بدقة — سوّ اختبار تجريبي عشان أوجهك أدق.";
+  else why = "ما سويت اختبار بعد — ابدأ بتأسيس عام، وبعدها سوّ اختبار تجريبي عشان أحدد ضعفك.";
+  const urgency = daysLeft > 0
+    ? (daysLeft <= 3 ? "باقي أيام معدودة — كل جلسة تفرق." : daysLeft <= 14 ? `باقي ${daysLeft} يوم — الحين وقت التكثيف.` : `باقي ${daysLeft} يوم.`)
+    : "";
+  res.json({
+    minutes, focus, why, urgency, doneToday, remaining,
+    weak: weak.slice(0, 3),
+    hasData: !!target,
+  });
+});
+
+// ---------- squad quiz battles (server-timed, answers hidden until the question closes) ----------
+const QUIZ_PER_Q = 22; // seconds per question
+function quizView(g, uid) {
+  const q = g?.quiz; if (!q) return null;
+  const elapsed = (Date.now() - q.startedAt) / 1000;
+  const qi = Math.floor(elapsed / QUIZ_PER_Q);
+  if (qi >= q.questions.length) return { done: true, scores: quizScores(g), total: q.questions.length, title: q.title };
+  const cur = q.questions[qi];
+  const intoQ = elapsed - qi * QUIZ_PER_Q;
+  const revealed = intoQ > QUIZ_PER_Q - 5; // last 5s: show the answer
+  return {
+    qi, total: q.questions.length, title: q.title,
+    q: cur.q, choices: cur.choices, topic: cur.topic,
+    endsAt: q.startedAt + (qi + 1) * QUIZ_PER_Q * 1000,
+    answer: revealed ? cur.answer : undefined,
+    why: revealed ? cur.why : undefined,
+    mine: (q.answers[uid] || {})[qi],
+    scores: quizScores(g),
+    answeredCount: Object.values(q.answers).filter(a => a[qi] !== undefined).length,
+  };
+}
+function quizScores(g) {
+  const q = g.quiz; if (!q) return [];
+  return g.members.map(m => {
+    const a = q.answers[m] || {};
+    let pts = 0, right = 0;
+    Object.entries(a).forEach(([qi, rec]) => {
+      const qq = q.questions[qi];
+      if (qq && rec.c === qq.answer) { right++; pts += 100 + Math.max(0, Math.round((1 - rec.t / QUIZ_PER_Q) * 50)); }
+    });
+    return { id: m, name: db.users[m]?.name || "?", avatar: db.users[m]?.avatar || 0, avatarImg: db.users[m]?.avatarImg || null, pts, right };
+  }).sort((a, b) => b.pts - a.pts);
+}
+app.post("/api/quiz/start", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const g = db.groups[req.body.groupCode];
+  if (!g || !g.members.includes(u.id)) return res.status(404).json({ error: "not in group" });
+  if (g.quiz && Date.now() - g.quiz.startedAt < g.quiz.questions.length * QUIZ_PER_Q * 1000) return res.status(400).json({ error: "فيه تحدي شغال الحين" });
+  if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server" });
+  if (!rateOk(u, res, 3)) return;
+  const count = Math.max(3, Math.min(12, Number(req.body.count) || 6));
+  const topic = String(req.body.topic || "").slice(0, 120);
+  const exam = String(req.body.exam || "general").slice(0, 32);
+  try {
+    const { text } = await callAI([
+      { role: "system", content: `أنت مُعِدّ أسئلة سريعة لتحدي جماعي بين طلاب يستعدون لاختبارات قياس (${exam}). أخرج JSON فقط:
+{"questions":[{"q":"سؤال قصير","choices":["أ","ب","ج","د"],"answer":0,"topic":"الموضوع","why":"سبب مختصر"}]}
+قواعد: ${count} أسئلة · كل سؤال يُحل خلال 20 ثانية (قصير ومباشر) · 4 خيارات · "answer" رقم (0-3) · لا تكرار.` },
+      { role: "user", content: topic ? `الموضوع: ${topic}` : `أسئلة منوعة من ${exam}` },
+    ], { maxTokens: 2200 });
+    const parsed = extractJson(text);
+    const qs = (parsed?.questions || (Array.isArray(parsed) ? parsed : []))
+      .filter(q => q && q.q && Array.isArray(q.choices) && q.choices.length >= 2)
+      .slice(0, count)
+      .map(q => ({
+        q: String(q.q).slice(0, 400), choices: q.choices.slice(0, 4).map(c => String(c).slice(0, 200)),
+        answer: Math.max(0, Math.min(q.choices.length - 1, Number(q.answer) || 0)),
+        topic: String(q.topic || "عام").slice(0, 40), why: String(q.why || "").slice(0, 300),
+      }));
+    if (!qs.length) return res.status(502).json({ error: "ما قدر يولّد أسئلة نظيفة — جرّب مرة ثانية" });
+    g.quiz = { questions: qs, startedAt: Date.now() + 4000, by: u.id, title: topic || "تحدي السرعة", answers: {}, paid: false };
+    save();
+    res.json({ ok: true, count: qs.length });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+app.post("/api/quiz/answer", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  const g = db.groups[req.body.groupCode];
+  if (!g?.quiz) return res.status(404).json({ error: "no quiz" });
+  const q = g.quiz;
+  const elapsed = (Date.now() - q.startedAt) / 1000;
+  const qi = Math.floor(elapsed / QUIZ_PER_Q);
+  if (qi !== Number(req.body.qi) || qi >= q.questions.length) return res.status(400).json({ error: "انتهى وقت هذا السؤال" });
+  q.answers[u.id] = q.answers[u.id] || {};
+  if (q.answers[u.id][qi] !== undefined) return res.status(400).json({ error: "جاوبت مسبقاً" });
+  q.answers[u.id][qi] = { c: Math.max(0, Math.min(3, Number(req.body.choice) || 0)), t: elapsed - qi * QUIZ_PER_Q };
+  save();
+  res.json({ ok: true });
+});
+function quizPayout(g) { // award the winner once, after the last question closes
+  const q = g.quiz;
+  if (!q || q.paid) return;
+  if (Date.now() < q.startedAt + q.questions.length * QUIZ_PER_Q * 1000) return;
+  q.paid = true;
+  const s = quizScores(g);
+  if (s[0]?.pts > 0 && db.users[s[0].id]) { db.users[s[0].id].coins += 150; q.winner = s[0].name; }
+  save();
+}
+
+// ---------- AI rival ----------
+const RIVAL_NAMES = ["الغريم", "نديم", "المنافس", "الشبح"];
+function rivalStats(u) {
+  const r = u.rival; if (!r?.on) return null;
+  const perDaySec = r.pace * 3600;
+  const now = new Date();
+  const dayFrac = (now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds()) / 86400;
+  const daysSince = Math.max(0, (Date.now() - r.startedAt) / 864e5);
+  const dow = (now.getDay() + 6) % 7; // Mon=0
+  return {
+    id: "rival", name: r.name, avatar: r.avatar, avatarImg: null, isRival: true,
+    today: Math.round(perDaySec * dayFrac),
+    week: Math.round(perDaySec * (dow + dayFrac)),
+    totalSeconds: Math.round(perDaySec * daysSince),
+    streak: Math.max(1, Math.floor(daysSince)), coins: 0, frame: null, flair: "BOT",
+    studying: dayFrac > 0.3 && dayFrac < 0.95, activity: "يذاكر بهدوء", elapsed: 1500,
+  };
+}
+app.post("/api/rival", (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (req.body.off) { if (u.rival) u.rival.on = false; save(); return res.json({ ok: true }); }
+  const pace = Math.max(0.5, Math.min(12, Number(req.body.pace) || 3));
+  u.rival = {
+    on: true, pace,
+    name: String(req.body.name || "").trim().slice(0, 20) || RIVAL_NAMES[Math.floor(Math.random() * RIVAL_NAMES.length)],
+    avatar: Math.floor(Math.random() * 12), startedAt: u.rival?.startedAt || Date.now(),
+  };
+  save();
+  res.json({ ok: true, rival: rivalStats(u) });
+});
+
+// ---------- natural-language command router ----------
+const COMMANDS = `start_timer{minutes:number,activity:string} | start_break{minutes:number} | stop_timer{} | create_challenge{type:"race"|"team"|"solo"|"streak",target:number,title:string} | group_focus{minutes:number} | start_quiz{count:number,topic:string} | generate_test{count:number,topic:string} | show_stats{} | show_shop{} | show_history{} | show_quests{} | nudge{name:string} | chat{text:string} | none{}`;
+app.post("/api/ai/command", async (req, res) => {
+  const u = auth(req, res); if (!u) return;
+  if (!AI_KEY) return res.status(503).json({ error: "AI not configured on this server" });
+  if (!rateOk(u, res)) return;
+  const text = String(req.body.text || "").slice(0, 500);
+  if (!text.trim()) return res.status(400).json({ error: "no text" });
+  try {
+    const { text: out } = await callAI([
+      { role: "system", content: `You convert a study-app user's request into ONE command. Reply with JSON only:
+{"action":"<name>","params":{...},"say":"<short confirmation in the user's language>"}
+Available: ${COMMANDS}
+Rules: pick the single best action. If it's a question/explanation request rather than an app action, use "chat" with params.text = the user's message. Defaults: timer 25 minutes, break 5, quiz 6 questions, test 10. "say" is one short sentence, no fluff.` },
+      { role: "user", content: text },
+    ], { maxTokens: 300 });
+    const j = extractJson(out) || {};
+    res.json({ action: String(j.action || "chat"), params: j.params && typeof j.params === "object" ? j.params : {}, say: String(j.say || "").slice(0, 200) });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
