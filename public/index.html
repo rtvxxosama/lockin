@@ -81,7 +81,11 @@
       <button class="amb" data-a="cafe">كافيه</button>
       <button class="amb" data-a="waves">أمواج</button>
       <button class="amb" data-a="deep">عميق</button>
+      <button class="amb amb-music" data-a="stream">🌊 جدول</button>
+      <button class="amb amb-music" data-a="surreal">🌲 غابة سريالية</button>
+      <button class="amb amb-mine" id="amb-mine-btn">🎵 موسيقاي</button>
     </div>
+    <input type="file" id="music-file" accept="audio/*" multiple class="hidden">
     <button id="btn-coach" class="btn small pop-lime coach-btn"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 8-4v6h2V7L12 2ZM6 11.2V15c0 1.7 2.7 3 6 3s6-1.3 6-3v-3.8l-6 3-6-3Z"/></svg> وش أذاكر الحين؟</button>
     <div id="coach-card" class="coach-card hidden"></div>
     <div class="timer-actions">
@@ -90,6 +94,7 @@
       <button id="btn-widget" class="btn ghost hidden" title="Floating mini-timer on top of other windows"><svg class="ic ic-xs" viewBox="0 0 24 24"><path d="M14 3h7v7h-2V6.4l-7.3 7.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H7v10h10v-4h2v6H5V5Z"/></svg> PIN</button>
     </div>
     <div class="goal-line">
+      <div id="now-playing" class="now-playing hidden"></div>
       <div class="goal-text"><span id="goal-label">Daily goal</span><span id="goal-val">0m / 3h</span></div>
       <div class="goal-bar"><i id="goal-fill"></i></div>
       <div class="session-dots" id="session-dots" title="Focus sessions today"></div>

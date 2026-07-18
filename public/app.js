@@ -949,6 +949,64 @@ function scheduleChill(ctx, out, state) {
   ambLater(() => scheduleChill(ctx, out, state), 6800 + Math.random() * 1400);
 }
 
+// ---- real audio tracks (bundled royalty-free + your own local files) ----
+const BUNDLED_TRACKS = {
+  stream: { src: "assets/stream.mp3", name: "جدول في غابة", by: "kvgarlic (chosic.com)" },
+  surreal: { src: "assets/surreal-forest.mp3", name: "Surreal Forest", by: "Meydän (chosic.com)" },
+};
+// IndexedDB so your own music survives restarts (localStorage can't hold audio)
+const musicDB = {
+  open() {
+    return new Promise((ok, no) => {
+      const rq = indexedDB.open("lockin-music", 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore("tracks", { keyPath: "id" });
+      rq.onsuccess = () => ok(rq.result);
+      rq.onerror = () => no(rq.error);
+    });
+  },
+  async all() {
+    const db = await this.open();
+    return new Promise((ok, no) => {
+      const rq = db.transaction("tracks").objectStore("tracks").getAll();
+      rq.onsuccess = () => ok(rq.result || []); rq.onerror = () => no(rq.error);
+    });
+  },
+  async add(file) {
+    const db = await this.open();
+    const rec = { id: "t" + Date.now() + Math.random().toString(36).slice(2, 6), name: file.name.replace(/\.[^.]+$/, "").slice(0, 60), size: file.size, blob: file };
+    return new Promise((ok, no) => {
+      const rq = db.transaction("tracks", "readwrite").objectStore("tracks").add(rec);
+      rq.onsuccess = () => ok(rec); rq.onerror = () => no(rq.error);
+    });
+  },
+  async remove(id) {
+    const db = await this.open();
+    return new Promise((ok, no) => {
+      const rq = db.transaction("tracks", "readwrite").objectStore("tracks").delete(id);
+      rq.onsuccess = () => ok(); rq.onerror = () => no(rq.error);
+    });
+  },
+};
+let myTracks = [];
+musicDB.all().then(t => { myTracks = t; }).catch(() => {});
+
+// play an audio file through the ambient mixer (so volume/fade/reverb all still apply)
+function trackLayer(ctx, out, url, onEnd) {
+  const el = new Audio(url);
+  el.loop = true; el.crossOrigin = "anonymous"; el.preload = "auto";
+  const node = ctx.createMediaElementSource(el);
+  const g = ctx.createGain(); g.gain.value = 1;
+  node.connect(g); g.connect(out);
+  el.play().catch(e => onEnd && onEnd(e));
+  return { el, gain: g, isTrack: true };
+}
+function showNowPlaying(label) {
+  const np = $("#now-playing");
+  if (!label) { np.classList.add("hidden"); np.innerHTML = ""; return; }
+  np.classList.remove("hidden");
+  np.innerHTML = `<span class="eq"><i></i><i></i><i></i></span><span>${esc(label)}</span>`;
+}
+
 const AMB_BUILDERS = {
   rain: (ctx, out) => {
     const l = [
