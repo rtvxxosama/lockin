@@ -104,7 +104,13 @@ function questState(u) {
 }
 
 // ---------- routes ----------
-app.get("/api/health", (req, res) => res.json({ ok: true, app: "lockin" }));
+app.get("/api/health", (req, res) => res.json({
+  ok: true, app: "lockin",
+  storage: pgPool ? "postgres" : "file",
+  hasDbUrl: !!process.env.DATABASE_URL,
+  users: Object.keys(db.users).length,
+  version: "3.3",
+}));
 
 app.post("/api/register", (req, res) => {
   const name = String(req.body.name || "").trim().slice(0, 24);
