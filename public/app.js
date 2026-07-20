@@ -1456,13 +1456,23 @@ $("#board").addEventListener("click", async (e) => {
   try { await api("/api/nudge", { toId: b.dataset.nudge }); sfx.click(); toast("Nudge sent 👉"); }
   catch (err) { sfx.error(); toast(err.message); }
 });
+// renderAll() runs every second off cached state, and the cached copy still holds nudges the
+// server already cleared — so dedupe by identity or one nudge fires a popup every tick.
+const seenNudges = new Set();
 function deliverNudges(me) {
-  (me.nudges || []).forEach((n, i) => {
+  const fresh = (me.nudges || []).filter(n => {
+    const key = `${n.from}|${n.at}`;
+    if (seenNudges.has(key)) return false;
+    seenNudges.add(key);
+    return true;
+  });
+  fresh.forEach((n, i) => {
     setTimeout(() => {
       toast(`👉 ${n.from} nudged you: get back to work!`, 5000);
       sfx.complete(); notify("Nudge!", `${n.from} says: get back to work`);
     }, i * 1200);
   });
+  if (seenNudges.size > 200) seenNudges.clear(); // bound it over long sessions
 }
 
 // ---------- stats deep-dive ----------
